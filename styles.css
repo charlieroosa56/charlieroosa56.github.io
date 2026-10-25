@@ -395,3 +395,37 @@ body { overscroll-behavior-y: none; }
 .notice.paused { border-color: var(--prob); background: var(--prob-bg); }
 /* while the PIN screen is up, nothing behind it shows */
 body.locked > header, body.locked > main { visibility: hidden; }
+
+/* approved: changes ready for the master sheet, one block per unit */
+.ap-h { display: flex; align-items: center; gap: 9px; padding: 10px 14px 9px; background: var(--surface-2); border-bottom: 1px solid var(--line); }
+.ap-h .t { font: 700 18px/1.1 var(--f-display); min-width: 0; overflow-wrap: anywhere; }
+.ap-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: start; padding: 11px 14px; border-top: 1px solid var(--line); }
+.ap-h + .ap-row { border-top: 0; }
+.ap-main { display: grid; gap: 5px; min-width: 0; }
+.ap-skip { font-size: 13px; font-weight: 600; color: var(--over); }
+.send-card { display: grid; gap: 10px; }
+.send-card p { margin: 0; }
+.send-card.confirm { border-color: var(--accent); background: var(--accent-soft); }
+.btn.decline { color: var(--over); border-color: var(--over); background: var(--surface); }
+.btn.decline:hover { background: var(--over-bg); }
+.intro .link { padding: 0; font-size: inherit; }
+
+/* app bar with four tabs: on a phone the person button sits up by the name, and the tabs share the row below */
+.appbar-in > .me-btn { order: 1; margin-left: auto; align-self: center; margin-bottom: 8px; }
+.appbar-in > .tabs { order: 2; }
+@media (max-width: 759px) {
+  .tabs { justify-content: space-between; overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { flex: none; padding-inline: 8px; white-space: nowrap; }
+}
+@media (max-width: 400px) {
+  .tab { font-size: 14px; padding-inline: 5px; gap: 5px; }
+  .tab .count { padding: 3px 5px; }
+}
+@media (min-width: 760px) {
+  .appbar-in > .tabs { order: 1; margin-left: auto; }
+  .appbar-in > .me-btn { order: 2; margin: 0 0 2px; align-self: flex-end; transform: translateY(-1px); }
+  .appbar-in { column-gap: 14px; }
+  .appbar-in > .brand { margin-right: 6px; }
+}
+@media (max-width: 759px) { .appbar-in > .brand { flex: 1 1 0; min-width: 0; } }

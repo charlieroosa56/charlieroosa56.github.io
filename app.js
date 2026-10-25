@@ -27,7 +27,8 @@
     tab: "fleet", q: "", cat: "all", st: "all", chFilter: "waiting",
     openId: null, editing: null, detailStale: false, attDraft: null, showNA: false,
     openSecs: new Set(["IDENTITY & STATUS"]), listScroll: 0,
-    keyBad: false, update: false, confirmReset: false, installEvt: null, storageError: false
+    keyBad: false, update: false, confirmReset: false, installEvt: null, storageError: false,
+    sendState: null, sendSkips: {}   // sending approved changes to the master sheet: null | "confirm" | "busy"
   };
   // The sheet's last copy, plus updates made on this phone that the sheet hasn't confirmed yet.
   const D = {
@@ -124,7 +125,7 @@
     const units = new Map(D.units);
     const pend = [];
     let problems = D.problems.slice();
-    const appr = new Map();
+    const appr = new Map(), copied = new Map();
     D.outbox.forEach(op => {
       if (op.t === "unit") {
         const u = units.get(op.unit); if (!u) return;
@@ -140,11 +141,21 @@
         problems = problems.map(p => (p.id === op.pid ? Object.assign({}, p, { status: "fixed", fixedAt: op.at, fixedBy: S.me.name }) : p));
       } else if (op.t === "approve") {
         (op.cids || []).forEach(id => appr.set(id, op.val));
+      } else if (op.t === "copied") {
+        (op.cids || []).forEach(id => { if (!copied.has(id)) copied.set(id, op.at); });
       }
     });
     const seen = new Set(D.changes.map(c => c.id));
     let changes = pend.filter(c => !seen.has(c.id)).reverse().concat(D.changes);
-    if (appr.size) changes = changes.map(c => (appr.has(c.id) ? Object.assign({}, c, { approval: appr.get(c.id) }) : c));
+    if (appr.size || copied.size) {
+      changes = changes.map(c => {
+        if (c.synced) return c;   // once it's in the master sheet, it stays as it was
+        let x = c;
+        if (appr.has(c.id)) x = Object.assign({}, x, { approval: appr.get(c.id) });
+        if (copied.has(c.id)) x = Object.assign({}, x, { synced: copied.get(c.id) });
+        return x;
+      });
+    }
     const pseen = new Set();
     problems = problems.filter(p => (pseen.has(p.id) ? false : (pseen.add(p.id), true)));
     S.units = units; S.changes = changes; S.problems = problems;
@@ -220,6 +231,8 @@
   async function init() {
     S.tab = "fleet";   // the app always opens on the main list, where Back stays put
     S.cat = lsGet("cat", "all");   // which equipment tab was open last
+    const skips = lsGet("skips", {});
+    S.sendSkips = skips && typeof skips === "object" ? skips : {};
     S.showNA = lsGet("showNA", false);
     (lsGet("openSecs", null) || []).forEach(s => S.openSecs.add(s));
     registerSW();
@@ -478,14 +491,15 @@
     $("#meBtn").hidden = !ready;
     renderHeader();
     if (!ready) { if (S.phase === "setup") renderSignin(); return; }
-    ["fleet", "due", "changes"].forEach(t => {
+    ["fleet", "due", "changes", "approved"].forEach(t => {
       $("#tab-" + t).setAttribute("aria-selected", String(S.tab === t));
     });
     $("#meBtn").setAttribute("aria-pressed", String(S.tab === "me"));
-    ["fleet", "due", "changes", "me"].forEach(t => { $("#view-" + t).hidden = S.tab !== t; });
+    TABS.forEach(t => { $("#view-" + t).hidden = S.tab !== t; });
     if (S.tab === "fleet") renderFleet();
     if (S.tab === "due") renderDue();
     if (S.tab === "changes") renderChanges();
+    if (S.tab === "approved") renderApproved();
     if (S.tab === "me" && !(fromSync && typingInMe())) renderMe();
     if (fromSync && S.editing) { S.detailStale = true; return; }
     renderDetail();
@@ -520,10 +534,14 @@
     dc.hidden = !(over + soon);
     dc.textContent = String(over + soon);
     dc.classList.toggle("hot", over > 0);
-    const w = S.changes.filter(c => changeState(c) === "waiting").length;
+    let w = 0, ap = 0;
+    S.changes.forEach(c => { const s = changeState(c); if (s === "waiting") w++; else if (s === "approved") ap++; });
     const cc = $("#chCount");
     cc.hidden = !w;
     cc.textContent = String(w);
+    const ac = $("#apCount");
+    ac.hidden = !ap;
+    ac.textContent = String(ap);
   }
 
   function stateBlock(kind) {
@@ -731,11 +749,12 @@
   function changeState(c) {
     if (STALE_RE.test(c.note || "")) return "stale";
     if (c.synced) return "synced";
+    if (c.approval === "Declined") return "declined";
     if (c.approval === "Approved") return "approved";
     return "waiting";
   }
-  const STATE_LABEL = { waiting: "Waiting for approval", approved: "Approved", synced: "In master sheet", stale: "Not used" };
-  const STATE_PILL = { waiting: "need", approved: "ok", synced: "set", stale: "set" };
+  const STATE_LABEL = { waiting: "Waiting for approval", approved: "Approved", declined: "Declined", synced: "In master sheet", stale: "Not used" };
+  const STATE_PILL = { waiting: "need", approved: "ok", declined: "over", synced: "set", stale: "set" };
   function sectionShort(title) {
     if (!title) return "";
     if (title.startsWith("SERVICE: ")) { const s = C.SERVICES.find(x => x.title === title); return "Service · " + (s ? s.short : title.slice(9)); }
@@ -752,44 +771,138 @@
     if (isNum && C.num(v) !== null) return f && f.type === "money" ? "$" + C.fmtNum(C.num(v)) : C.fmtNum(C.num(v));
     return String(v);
   }
+  function changeDiff(c, from, to) {
+    if (c.note === "Confirmed") return `<span class="to">Confirmed: ${esc(to)}</span>`;
+    return `<span class="from">${esc(from || "empty")}</span><span class="arrow" aria-label="changed to">→</span><span class="to">${esc(to || "cleared")}</span>`;
+  }
+  // "Engine oil · Oil Filter P/N", or just "Notes" when the section and the field have the same name.
+  function fieldName(c) {
+    const sec = sectionShort(c.section), label = String(c.label || c.key || "");
+    return !sec || sec.toLowerCase() === label.toLowerCase() ? label : sec + " · " + label;
+  }
+  const pendingNote = c => (c.pending ? (isOffline() ? " · saved on this phone, will send" : " · sending…") : "");
+  const plural = (k, word) => k + " " + word + (k === 1 ? "" : "s");
+
   function renderChanges() {
     const el = $("#view-changes");
     const all = S.changes.map(c => Object.assign({ state: changeState(c) }, c));
     const n = st => all.filter(c => c.state === st).length;
-    const filters = [["waiting", "Waiting"], ["approved", "Approved"], ["synced", "In master sheet"], ["all", "All"]];
+    const filters = [["waiting", "Waiting"], ["declined", "Declined"], ["synced", "Sent"], ["all", "All"]];
+    if (!filters.some(f => f[0] === S.chFilter)) S.chFilter = "waiting";
     const shown = S.chFilter === "all" ? all : all.filter(c => c.state === S.chFilter);
     const owner = S.me.isOwner && !S.readOnly;
     const more = D.changesTotal > D.changes.length ? D.changesTotal - D.changes.length : 0;
+    const nAp = n("approved");
     let html = `<div class="card card-pad intro">
-      <p>Every change you make to a unit's details is listed here. The master sheet doesn't change on its own. Approve the changes you want, then ask Claude to copy the approved changes into the master sheet. Problems and fuel flags stay in the app.</p>
+      <p>Every change to a unit's details shows up here first. <b>Approve</b> the ones you want in the master sheet, or <b>decline</b> one that was a mistake. Approved changes wait on the <button class="link" type="button" data-tab="approved">Approved</button> tab until you send them.</p>
       ${owner && n("waiting") ? `<div class="row-actions"><button class="btn primary" data-action="approve-all">Approve all waiting (${n("waiting")})</button></div>` : ""}
     </div>
-    <div class="chips" role="group" aria-label="Show changes">${filters.map(([k, l]) =>
+    <div class="chips" role="group" aria-label="Show changes: waiting, declined, sent to the master sheet, or all">${filters.map(([k, l]) =>
       `<button class="chip" data-chf="${k}" aria-pressed="${S.chFilter === k}">${l} <span class="n">${k === "all" ? all.length : n(k)}</span></button>`).join("")}</div>`;
     if (!S.changesLoaded) html += stateBlock("loading");
     else if (!shown.length) {
-      const msg = { waiting: "Nothing is waiting. Changes you make to a unit show up here.", approved: "No approved changes are waiting to go into the master sheet.", synced: "Nothing has been copied into the master sheet yet.", all: "No changes yet. Edit a unit to see it here." }[S.chFilter];
-      html += `<div class="card empty-state"><h3>All clear</h3><p>${msg}</p></div>`;
+      const msg = {
+        waiting: "Nothing is waiting. Changes you make to a unit show up here." + (nAp ? ` ${plural(nAp, "approved change")} ${nAp === 1 ? "is" : "are"} on the Approved tab.` : ""),
+        declined: "Nothing declined. Declining a change keeps it out of the master sheet.",
+        synced: "Nothing has been sent to the master sheet yet.",
+        all: "No changes yet. Edit a unit to see it here."
+      }[S.chFilter];
+      html += `<div class="card empty-state"><h3>All clear</h3><p>${msg}</p>${S.chFilter === "waiting" && nAp ? `<p style="margin-top:12px"><button class="btn" data-tab="approved">Go to Approved</button></p>` : ""}</div>`;
     } else {
       html += `<section class="group">${shown.map(c => {
-        const from = fmtChangeVal(c, c.from), to = fmtChangeVal(c, c.to);
         const unitName = (S.units.get(c.unit) && nameOf(S.units.get(c.unit))) || c.unitName || c.unit;
-        const confirm = c.note === "Confirmed";
-        return `<div class="ch${c.state === "stale" ? " stale" : ""}">
+        let acts = "";
+        if (owner && c.state === "waiting") acts = `<button class="btn small primary" data-action="approve" data-id="${esc(c.id)}">Approve</button><button class="btn small decline" data-action="decline" data-id="${esc(c.id)}">Decline</button>`;
+        else if (owner && c.state === "approved") acts = `<button class="btn small" data-action="unapprove" data-id="${esc(c.id)}">Undo approval</button>`;
+        else if (owner && c.state === "declined") acts = `<button class="btn small" data-action="undecline" data-id="${esc(c.id)}">Undo decline</button>`;
+        return `<div class="ch${c.state === "stale" || c.state === "declined" ? " stale" : ""}">
           <div class="ch-top"><span class="plate">${esc(c.unit)}</span><span class="t">${esc(unitName)}</span><span class="pill ${STATE_PILL[c.state]}">${STATE_LABEL[c.state]}</span></div>
-          <div class="ch-field">${esc(sectionShort(c.section))} · ${esc(c.label)}</div>
-          <div class="ch-diff">${confirm
-            ? `<span class="to">Confirmed: ${esc(to)}</span>`
-            : `<span class="from">${esc(from || "empty")}</span><span class="arrow" aria-label="changed to">→</span><span class="to">${esc(to || "cleared")}</span>`}</div>
-          <div class="ch-meta">${esc(whenText(c.at))} · ${esc(whoName(c.by))}${c.pending ? (isOffline() ? " · saved on this phone, will send" : " · sending…") : ""}${c.state === "stale" ? " · a newer value was saved first, so this one wasn't used" : ""}</div>
-          ${owner && (c.state === "waiting" || c.state === "approved") ? `<div class="row-actions">${c.state === "waiting"
-            ? `<button class="btn small primary" data-action="approve" data-id="${esc(c.id)}">Approve</button>`
-            : `<button class="btn small" data-action="unapprove" data-id="${esc(c.id)}">Undo approval</button>`}</div>` : ""}
+          <div class="ch-field">${esc(fieldName(c))}</div>
+          <div class="ch-diff">${changeDiff(c, fmtChangeVal(c, c.from), fmtChangeVal(c, c.to))}</div>
+          <div class="ch-meta">${esc(whenText(c.at))} · ${esc(whoName(c.by))}${pendingNote(c)}${c.state === "stale" ? " · a newer value was saved first, so this one wasn't used" : ""}${c.state === "declined" ? " · won't go to the master sheet" : ""}</div>
+          ${acts ? `<div class="row-actions">${acts}</div>` : ""}
         </div>`;
       }).join("")}</section>`;
       if (more && S.chFilter === "all") html += `<p class="muted small" style="margin:0 2px">Showing the latest ${D.changes.length}. The other ${more} are on the Changes tab of your sheet.</p>`;
     }
     el.innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------- approved: ready for the master sheet
+  // One line per field. A field changed more than once only needs its newest approved value in the master sheet.
+  const FIELD_ORDER = (() => {
+    const keys = [];
+    C.SECTIONS.forEach(s => {
+      if (s.title === "PAPERWORK & OWNERSHIP") C.SERVICES.forEach(sv => ["ih", "im", "ld", "lh"].forEach(sub => keys.push("svc." + sv.key + "." + sub)));
+      s.fields.forEach(([k]) => { keys.push(k); if (k === "setup") keys.push("att"); });
+    });
+    return new Map(keys.map((k, i) => [k, i]));
+  })();
+  function approvedGroups() {
+    const groups = new Map();
+    S.changes.forEach(c => {   // newest first
+      if (changeState(c) !== "approved") return;
+      const k = c.unit + "\u0001" + (c.key || c.label);
+      let g = groups.get(k);
+      if (!g) { g = { unit: c.unit, key: c.key || "", items: [] }; groups.set(k, g); }
+      g.items.push(c);
+    });
+    return [...groups.values()].map(g => Object.assign(g, { latest: g.items[0], first: g.items[g.items.length - 1] }));
+  }
+
+  function renderApproved() {
+    const el = $("#view-approved");
+    if (!S.changesLoaded) { el.innerHTML = stateBlock("loading"); return; }
+    const groups = approvedGroups();
+    const n = groups.reduce((s, g) => s + g.items.length, 0);
+    if (!n) {
+      const sent = S.changes.some(c => changeState(c) === "synced"), waiting = S.changes.some(c => changeState(c) === "waiting");
+      el.innerHTML = `<div class="card empty-state"><h3>${sent ? "All sent" : "Nothing approved"}</h3><p>${sent ? "Everything you approved is in the master sheet." : "Approve changes on the Changes tab."} New approvals wait here until you send them to the master sheet.</p>${waiting ? `<p style="margin-top:12px"><button class="btn" data-tab="changes">Go to Changes</button></p>` : ""}</div>`;
+      return;
+    }
+    const order = new Map(unitsArr().map((u, i) => [u.id, i]));
+    const byUnit = new Map();
+    groups.forEach(g => { if (!byUnit.has(g.unit)) byUnit.set(g.unit, []); byUnit.get(g.unit).push(g); });
+    const rank = id => (order.has(id) ? order.get(id) : 99999);
+    const ids = [...byUnit.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+    const fr = g => (FIELD_ORDER.has(g.key) ? FIELD_ORDER.get(g.key) : 9999);
+    let html = `<div class="card card-pad intro"><p><b>${plural(n, "approved change")}</b> to ${plural(ids.length, "unit")}, ready for the master sheet. Nothing there changes until you tap <b>Send</b> at the bottom.</p></div>`;
+    ids.forEach(id => {
+      const u = S.units.get(id), list = byUnit.get(id).sort((a, b) => fr(a) - fr(b));
+      html += `<section class="group ap-unit"><div class="ap-h"><span class="plate">${esc(id)}</span><span class="t">${esc((u && nameOf(u)) || list[0].latest.unitName || id)}</span></div>${list.map(apRow).join("")}</section>`;
+    });
+    html += sendCard(n);
+    el.innerHTML = html;
+  }
+
+  function apRow(g) {
+    const c = g.latest, first = g.first, many = g.items.length > 1;
+    const who = [...new Set(g.items.map(x => whoName(x.by)))].join(", ");
+    const skip = g.items.map(x => S.sendSkips[x.id]).find(Boolean);
+    const busy = S.sendState === "busy";
+    return `<div class="ap-row">
+      <div class="ap-main">
+        <div class="ch-field">${esc(fieldName(c))}</div>
+        <div class="ch-diff">${changeDiff(c, fmtChangeVal(first, first.from), fmtChangeVal(c, c.to))}</div>
+        <div class="ch-meta">${many ? g.items.length + " changes, newest " : ""}${esc(whenText(c.at))} · ${esc(who)}${pendingNote(c)}</div>
+        ${skip ? `<div class="ap-skip">Didn't go in last time: ${esc(skip)}</div>` : ""}
+      </div>
+      <button class="btn small" type="button" data-action="ap-undo" data-ids="${esc(g.items.map(x => x.id).join(" "))}" aria-label="Undo approval: ${esc(c.unit)} ${esc(c.label)}"${busy ? " disabled" : ""}>Undo</button>
+    </div>`;
+  }
+
+  function sendCard(n) {
+    const cfg = D.config || {};
+    const linked = !!(cfg.masterUrl && cfg.masterKey);
+    const busy = S.sendState === "busy", sure = S.sendState === "confirm" && linked && !isOffline();
+    const what = plural(n, "change");
+    let btn = `<button class="btn primary wide" type="button" disabled>Send ${what} to master sheet</button>`;
+    let note = "Only those cells change in the master sheet. Formulas and cells marked n/a are left alone.";
+    if (!linked) note = "The master sheet isn't linked to the app yet.";
+    else if (busy) btn = `<button class="btn primary wide" type="button" disabled>Sending to the master sheet…</button>`;
+    else if (isOffline()) note = "No signal right now. Sending to the master sheet needs service.";
+    else btn = `<button class="btn primary wide" type="button" data-action="send-master">${sure ? `Tap again to send ${what}` : `Send ${what} to master sheet`}</button>`;
+    return `<div class="card card-pad send-card${sure ? " confirm" : ""}">${btn}<p class="muted small">${esc(note)}</p></div>`;
   }
 
   // ---------------------------------------------------------------- you: sync, app lock, backup
@@ -1408,16 +1521,143 @@
   }
 
   function setApproval(ids, approved) {
-    if (!S.me.isOwner || !ids.length) return;
+    if (!S.me.isOwner || !ids.length) return false;
     queueOp({ t: "approve", cids: ids, val: approved ? "Approved" : "" });
     render();
+    return true;
   }
 
   function approveAll() {
     const ids = S.changes.filter(c => changeState(c) === "waiting").map(c => c.id);
     if (!ids.length) return;
     setApproval(ids, true);
-    toast(`Approved ${ids.length} change${ids.length === 1 ? "" : "s"}. Ask Claude to copy them into the master sheet.`);
+    toast(`Approved ${plural(ids.length, "change")}. They're on the Approved tab, ready to send to the master sheet.`);
+  }
+
+  // Declining a change that was sent in by mistake: it never goes to the master sheet, and if it's still the
+  // newest change to that field, the field goes back to what it was before.
+  const findChange = id => S.changes.find(c => c.id === id) || null;
+  function fieldNow(u, key) {
+    if (key === "att") return (u.att || []).join(", ");
+    if (key.startsWith("svc.")) { const p = key.split("."); return plain(((u.svc || {})[p[1]] || {})[p[2]], p[2] === "ld" ? "date" : "num"); }
+    const f = C.FIELDS[key];
+    return plain((u.v || {})[key], f ? f.type : "text");
+  }
+  // The patch that puts a field back to a value as the Changes list shows it (dates as MM/DD/YYYY, lists joined).
+  function fieldPatch(key, val) {
+    val = val === null || val === undefined ? "" : String(val);
+    const day = s => { const d = C.parseDate(s); return d ? C.isoDate(d) : s; };
+    const number = s => { const x = C.num(s.replace(/^\$/, "")); return x === null ? s : x; };
+    if (key === "att") return { att: val ? val.split(", ").map(s => s.trim()).filter(Boolean) : [] };
+    if (key.startsWith("svc.")) {
+      const p = key.split(".");
+      if (!C.SVC[p[1]] || !C.SVC_SUB[p[2]]) return null;
+      return { svc: { [p[1]]: { [p[2]]: val === "" ? "" : p[2] === "ld" ? day(val) : number(val) } } };
+    }
+    const f = C.FIELDS[key];
+    if (!f) return null;
+    let x = val;
+    if (val !== "" && (f.type === "num" || f.type === "money")) x = number(val);
+    else if (val !== "" && (f.type === "date" || f.type === "expiry")) x = day(val);
+    const patch = { v: { [key]: x } };
+    if (key === "insp") { const d = C.parseDate(val); patch.v.inspdone = d ? (d.getFullYear() - 1) + "-" + String(d.getMonth() + 1).padStart(2, "0") : ""; }
+    return patch;
+  }
+  // Set the field to `val` if it still shows `expect` and no newer change to it is standing.
+  function fieldBack(c, val, expect) {
+    if (!c || c.note === "Confirmed" || !c.key) return null;
+    const u = S.units.get(c.unit);
+    if (!u) return null;
+    const newer = S.changes.some(x => x.id !== c.id && x.unit === c.unit && x.key === c.key && String(x.at) > String(c.at) && !["stale", "declined"].includes(changeState(x)));
+    if (newer || fieldNow(u, c.key) !== String(expect === null || expect === undefined ? "" : expect)) return null;
+    const patch = fieldPatch(c.key, val);
+    return patch ? { t: "unit", unit: u.id, unitName: nameOf(u), patch, log: [] } : null;
+  }
+
+  function declineChange(id) {
+    const c = findChange(id);
+    if (!S.me.isOwner || !c || !["waiting", "approved"].includes(changeState(c))) return;
+    const back = fieldBack(c, c.from, c.to);
+    queueOp({ t: "approve", cids: [id], val: "Declined" });
+    if (back) queueOp(back);
+    render();
+    const u = S.units.get(c.unit), shown = fmtChangeVal(c, c.from);
+    toast(back ? `Declined. ${c.label || "That field"} on ${u ? nameOf(u) : c.unit} is back to ${shown || "empty"}.` : "Declined. It won't go to the master sheet.");
+  }
+  function undoDecline(id) {
+    const c = findChange(id);
+    if (!S.me.isOwner || !c || changeState(c) !== "declined") return;
+    queueOp({ t: "approve", cids: [id], val: "" });
+    const again = fieldBack(c, c.to, c.from);   // decline had put the old value back: use this one again
+    if (again) queueOp(again);
+    render();
+    toast("Back to waiting for approval.");
+  }
+  function undoApproval(ids) {
+    if (!setApproval(ids, false)) return;
+    toast(ids.length === 1 ? "Moved back to Waiting under Changes." : `Moved ${ids.length} changes back to Waiting under Changes.`);
+  }
+
+  // ---------------------------------------------------------------- sending approved changes to the master sheet
+  // The master sheet has its own small link (its own Apps Script); the app sends it each approved field's newest
+  // value, then tells your sheet which changes went in.
+  function masterName(v) {
+    const ini = (D.config && D.config.initials) || {};
+    const keys = Object.keys(ini).filter(k => ini[k] === v);
+    return keys.find(k => k.includes(" – ")) || keys[0] || v;
+  }
+  function masterItem(g) {
+    const c = g.latest, key = c.key || "", f = C.FIELDS[key];
+    let type = "text", value = c.to === null || c.to === undefined ? "" : String(c.to);
+    if (key === "att") { type = "list"; value = value ? value.split(", ").map(s => s.trim()).filter(Boolean) : []; }
+    else if (key.startsWith("svc.")) type = key.split(".")[2] === "ld" ? "date" : "num";
+    else if (f && (f.type === "num" || f.type === "money")) type = "num";
+    else if (f && (f.type === "date" || f.type === "expiry")) type = "date";
+    if (type === "num" && value !== "") { const x = C.num(value.replace(/^\$/, "")); if (x !== null) value = x; }
+    if (type === "date" && value !== "") { const d = C.parseDate(value); if (d) value = C.isoDate(d); }
+    if (key === "owner") value = masterName(value);
+    const at = new Date(c.at);
+    return { ids: g.items.map(x => x.id), unit: c.unit, key, section: c.section, label: c.label, type, value,
+      by: c.by || S.me.name, at: c.at, day: isNaN(at) ? "" : C.isoDate(at), confirm: c.note === "Confirmed" };
+  }
+
+  async function sendToMaster() {
+    const cfg = D.config || {};
+    if (S.sendState === "busy") return;
+    if (!cfg.masterUrl || !cfg.masterKey) { toast("The master sheet isn't linked to the app yet."); return; }
+    if (isOffline()) { toast("No signal right now. Sending to the master sheet needs service."); return; }
+    const groups = approvedGroups();
+    if (!groups.length) return;
+    clearTimeout(S.sendTimer);
+    if (S.sendState !== "confirm") {
+      S.sendState = "confirm";
+      renderApproved();
+      S.sendTimer = setTimeout(() => { if (S.sendState === "confirm") { S.sendState = null; if (S.tab === "approved") renderApproved(); } }, 8000);
+      return;
+    }
+    S.sendState = "busy";
+    renderApproved();
+    let res = null, fail = "";
+    try { res = await M.post(cfg.masterUrl, { key: cfg.masterKey, by: S.me.name, app: VERSION, changes: groups.map(masterItem) }, 150000); }
+    catch (e) { fail = e && e.server ? "The master sheet had a problem: " + e.message : "Couldn't reach the master sheet. Check your signal and try again."; }
+    S.sendState = null;
+    if (!fail && (!res || res.ok !== true)) {
+      fail = res && res.error === "bad_key" ? "The master sheet's code doesn't match the one on your sheet's Settings tab."
+        : res && res.error === "busy" ? "The master sheet is busy. Try again in a minute."
+        : "The master sheet had a problem" + (res && res.message ? ": " + res.message : "") + ". Nothing was marked as sent.";
+    }
+    if (fail) { render(); toast(fail); return; }
+    const copied = (Array.isArray(res.copied) ? res.copied : []).filter(id => typeof id === "string" && findChange(id));
+    const skips = {};
+    (Array.isArray(res.skipped) ? res.skipped : []).forEach(s => (s && Array.isArray(s.ids) ? s.ids : []).forEach(id => { skips[id] = String(s.why || "It couldn't go in."); }));
+    S.sendSkips = skips;
+    lsSet("skips", skips);
+    if (copied.length) queueOp({ t: "copied", cids: copied });
+    render();
+    const left = Object.keys(skips).length;
+    toast(copied.length
+      ? `Done. ${plural(copied.length, "change")} went into the master sheet.` + (left ? ` ${left} couldn't; the reason is on each one.` : "")
+      : left ? "None of them could go in. The reason is on each one." : "Nothing was sent.");
   }
 
   // ---------------------------------------------------------------- the phone's Back button
@@ -1428,7 +1668,7 @@
   // that was added right after a tap (one step per tap), so the step under the main list is put back after your
   // next tap, and only when that tap didn't already add a step of its own.
   const NAV = { on: false, atBase: true, pushed: false, ignore: 0, rootW: null };
-  const TABS = ["fleet", "due", "changes", "me"];
+  const TABS = ["fleet", "due", "changes", "approved", "me"];
   const screenNow = extra => Object.assign({ ml: 1, tab: S.tab, openId: S.openId || null }, extra || {});
 
   function navStart() {
@@ -1517,6 +1757,7 @@
     S.editing = null; S.attDraft = null;
     S.tab = t; lsSet("tab", t);
     S.confirmReset = false;
+    if (S.sendState === "confirm") S.sendState = null;
     if (window.innerWidth < 980 && S.openId) closeUnit(true);
     navPush();
     render();
@@ -1602,9 +1843,13 @@
     }
     if (a === "confirm") return confirmField(t.dataset.key);
     if (a === "cancel") { endEdit(); renderDetail(); if (S.detailStale) render(); rootWatch(); return; }
-    if (a === "approve") return setApproval([t.dataset.id], true);
-    if (a === "unapprove") return setApproval([t.dataset.id], false);
+    if (a === "approve") { if (setApproval([t.dataset.id], true)) toast("Approved. It's on the Approved tab, ready to send to the master sheet."); return; }
+    if (a === "unapprove") return undoApproval([t.dataset.id]);
     if (a === "approve-all") return approveAll();
+    if (a === "decline") return declineChange(t.dataset.id);
+    if (a === "undecline") return undoDecline(t.dataset.id);
+    if (a === "ap-undo") return undoApproval(String(t.dataset.ids || "").split(" ").filter(Boolean));
+    if (a === "send-master") return sendToMaster();
     if (a === "sync-now") { if (navigator.onLine === false) { toast("No signal right now. Everything's saved on this phone and will send by itself."); return; } toast("Syncing…"); return sync({ full: true, user: true }); }
     if (a === "lock-now") return openLock("unlock");
     if (a === "pin-change") return openLock("change");
@@ -1675,6 +1920,6 @@
   $("#q").addEventListener("input", e => { S.q = e.target.value; renderFleet(); });
 
   // for the local test harness only
-  window.__ML = { S, D, L, NAV, sync, reloadFromDb };
+  window.__ML = { S, D, L, NAV, sync, reloadFromDb, approvedGroups, changeState };
   init();
 })();

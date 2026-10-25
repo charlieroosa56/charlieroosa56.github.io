@@ -26,13 +26,14 @@
       <div class="brand-mark" id="brandMark" aria-hidden="true">ML</div>
       <div><h1 id="brandName">Machine List</h1><p id="subline">Loading…</p></div>
     </div>
+    <button class="me-btn" id="meBtn" data-tab="me" aria-pressed="false" aria-label="You: sync, app lock and backup" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"></path></svg><span id="meName">Me</span>
+    </button>
     <nav class="tabs" id="tabs" role="tablist" aria-label="App sections" hidden>
       <button class="tab" role="tab" id="tab-fleet" data-tab="fleet" aria-selected="true">Fleet</button>
       <button class="tab" role="tab" id="tab-due" data-tab="due" aria-selected="false">Due <span class="count" id="dueCount" hidden></span></button>
       <button class="tab" role="tab" id="tab-changes" data-tab="changes" aria-selected="false">Changes <span class="count" id="chCount" hidden></span></button>
-      <button class="me-btn" id="meBtn" data-tab="me" aria-pressed="false" aria-label="You: sync, app lock and backup" hidden>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"></path></svg><span id="meName">Me</span>
-      </button>
+      <button class="tab" role="tab" id="tab-approved" data-tab="approved" aria-selected="false">Approved <span class="count" id="apCount" hidden></span></button>
     </nav>
   </div>
 </header>
@@ -51,6 +52,7 @@
     </div>
     <div id="view-due" class="stack" hidden></div>
     <div id="view-changes" class="stack" hidden></div>
+    <div id="view-approved" class="stack" hidden></div>
     <div id="view-me" class="stack" hidden></div>
   </section>
   <section class="pane-detail" id="detail" aria-label="Unit details"></section>
