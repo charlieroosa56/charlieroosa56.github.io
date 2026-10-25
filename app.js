@@ -218,8 +218,7 @@
 
   // ---------------------------------------------------------------- boot
   async function init() {
-    S.tab = lsGet("tab", "fleet");
-    if (!["fleet", "due", "changes", "me"].includes(S.tab)) S.tab = "fleet";
+    S.tab = "fleet";   // the app always opens on the main list, where Back stays put
     S.cat = lsGet("cat", "all");   // which equipment tab was open last
     S.showNA = lsGet("showNA", false);
     (lsGet("openSecs", null) || []).forEach(s => S.openSecs.add(s));
@@ -242,6 +241,7 @@
     if (!D.setup || !D.loaded) { S.phase = "setup"; render(); return; }
     S.phase = "app";
     derive();
+    navStart();
     if (shouldLock()) openLock("unlock");
     render();
     sync({ full: true });
@@ -341,6 +341,7 @@
     derive();
     S.phase = "app";
     S.tab = "fleet";
+    navStart();
     lsSet("seenAt", Date.now());
     if (!L.pin) openLock("new", true);
     render();
@@ -1239,7 +1240,7 @@
       label: ch.label, section: ch.section, from: plain(ch.from, ch.type), to: plain(ch.to, ch.type), kind: ch.kind || ""
     }));
     queueOp({ t: "unit", unit: u.id, unitName, patch, log });
-    S.editing = null; S.attDraft = null;
+    endEdit();
     render();
     toast((msg || "Saved. Approve it under Changes when you want it in the master sheet.") + offlineNote());
     return true;
@@ -1250,7 +1251,7 @@
 
   function saveValue(u, f, val, msg) {
     const old = (u.v || {})[f.key];
-    if (same(old, val)) { S.editing = null; renderDetail(); return; }
+    if (same(old, val)) { endEdit(); renderDetail(); return; }
     const patch = { v: { [f.key]: val } };
     const unc = u.unconfirmed || [];
     if (unc.includes(f.key)) patch.unconfirmed = unc.filter(k => k !== f.key);
@@ -1301,7 +1302,7 @@
     const patch = { v: {} }, changes = [];
     if (old !== n) { patch.v.cur = n; changes.push({ key: "cur", label: C.FIELDS.cur.label, section: "HOURS", from: old, to: n, type: "num" }); }
     if (!same((u.v || {}).read, date)) { patch.v.read = date; changes.push({ key: "read", label: C.FIELDS.read.label, section: "HOURS", from: (u.v || {}).read, to: date, type: "date" }); }
-    if (!changes.length) { S.editing = null; renderDetail(); return; }
+    if (!changes.length) { endEdit(); renderDetail(); return; }
     commit(u, patch, changes, `Saved ${C.fmtNum(n)} ${word} for ${nameOf(u)}.`);
   }
 
@@ -1325,7 +1326,7 @@
       patch.svc[key][sub] = next[sub];
       changes.push({ key: "svc." + key + "." + sub, label: C.SVC_SUB[sub].label, section: s.title, from: cur[sub], to: next[sub], type: sub === "ld" ? "date" : "num" });
     });
-    if (!changes.length) { S.editing = null; renderDetail(); return; }
+    if (!changes.length) { endEdit(); renderDetail(); return; }
     commit(u, patch, changes, `Saved ${s.short.toLowerCase()} for ${nameOf(u)}.`);
   }
 
@@ -1346,7 +1347,7 @@
     const extra = form.elements.add && form.elements.add.value.trim();
     if (extra && S.attDraft.length < 6) S.attDraft.push(extra);
     const old = u.att || [];
-    if (old.join("\u0001") === S.attDraft.join("\u0001")) { S.editing = null; S.attDraft = null; renderDetail(); return; }
+    if (old.join("\u0001") === S.attDraft.join("\u0001")) { endEdit(); renderDetail(); return; }
     commit(u, { att: S.attDraft.slice() }, [{ key: "att", label: "Bucket / Attachment 1–6", section: "BUCKETS & ATTACHMENTS", from: old, to: S.attDraft.slice(), type: "list" }],
       `Saved the attachment list for ${nameOf(u)}.`);
   }
@@ -1360,7 +1361,7 @@
     const done = y + "-" + String(m).padStart(2, "0");
     const exp = C.isoDate(new Date(y + 1, m, 0));
     const v = u.v || {};
-    if (v.inspdone === done && same(v.insp, exp)) { S.editing = null; renderDetail(); return; }
+    if (v.inspdone === done && same(v.insp, exp)) { endEdit(); renderDetail(); return; }
     const f = C.FIELDS.insp;
     commit(u, { v: { inspdone: done, insp: exp } }, [{ key: "insp", label: f.label, section: f.section, from: v.insp, to: exp, type: "expiry" }],
       `Saved. ${nameOf(u)} was inspected ${C.MONTHS[m - 1]} ${y} and is good through ${C.MONTHS[m - 1]} ${y + 1}.`);
@@ -1372,10 +1373,10 @@
     const picked = new Set([...form.querySelectorAll('input[name="w"]:checked')].map(i => i.value));
     const keep = (u.att || []).filter(a => picked.has(a));
     const old = attWithList(u);
-    if (old !== null && old.join("\u0001") === keep.join("\u0001")) { S.editing = null; renderDetail(); return; }
+    if (old !== null && old.join("\u0001") === keep.join("\u0001")) { endEdit(); renderDetail(); return; }
     queueOp({ t: "unit", unit: u.id, unitName: nameOf(u), log: [],
       patch: { v: { attwith: keep, attwithat: new Date().toISOString(), attwithby: S.me.name } } });
-    S.editing = null;
+    endEdit();
     render();
     toast((keep.length ? `With ${nameOf(u)}: ${keep.join(", ")}.` : `Marked ${nameOf(u)} as having none of its attachments.`) + offlineNote());
   }
@@ -1386,7 +1387,7 @@
     const text = form.elements.text.value.trim();
     if (!text) return showWarn(form, "probWarn", "Describe the problem so the next person knows what to look at.");
     queueOp({ t: "prob", pid: newId("P"), unit: u.id, unitName: nameOf(u), text });
-    S.editing = null;
+    endEdit();
     render();
     toast(`Problem reported. ${nameOf(u)} shows orange in the list until it's marked fixed.` + offlineNote());
   }
@@ -1419,33 +1420,135 @@
     toast(`Approved ${ids.length} change${ids.length === 1 ? "" : "s"}. Ask Claude to copy them into the master sheet.`);
   }
 
+  // ---------------------------------------------------------------- the phone's Back button
+  // Back steps back through what you did in the app, like any phone app: it closes an open editor, then goes
+  // from a unit back to the list, then back through the tabs you were on. On the main list it does nothing,
+  // so Back never takes you out of the app; the home button does.
+  // Each screen is a step in the browser's history. Phones only let a web app hold the Back button with a step
+  // that was added right after a tap (one step per tap), so the step under the main list is put back after your
+  // next tap, and only when that tap didn't already add a step of its own.
+  const NAV = { on: false, atBase: true, pushed: false, ignore: 0, rootW: null };
+  const TABS = ["fleet", "due", "changes", "me"];
+  const screenNow = extra => Object.assign({ ml: 1, tab: S.tab, openId: S.openId || null }, extra || {});
+
+  function navStart() {
+    if (NAV.on) return;
+    NAV.on = true;
+    try { history.scrollRestoration = "manual"; } catch (e) { /* older browsers */ }
+    try { history.replaceState({ ml: 1, base: 1, tab: "fleet", openId: null }, ""); } catch (e) { /* fine */ }
+    NAV.atBase = true;
+    const tapped = () => { NAV.pushed = false; setTimeout(navArm, 0); };
+    document.addEventListener("click", tapped, true);
+    document.addEventListener("keydown", tapped, true);
+    window.addEventListener("popstate", onBack);
+    rootWatch();
+  }
+  // On the bottom step after a tap that didn't move anywhere: add a step for this screen, so Back has one to take.
+  function navArm() {
+    if (!NAV.on || !NAV.atBase || NAV.pushed || S.phase !== "app") return;
+    try { history.pushState(screenNow(S.editing ? { ed: 1 } : null), ""); NAV.atBase = false; } catch (e) { /* fine */ }
+  }
+  // Moving to a new screen: remember how far down the old one was scrolled, then add a step for the new one.
+  // Leaving an open editor reuses its step, so Back doesn't stop on a screen that looks the same.
+  function navPush(extra) {
+    if (!NAV.on) return;
+    NAV.pushed = true;
+    try {
+      const cur = history.state;
+      if (cur && cur.ml && cur.ed && !(extra && extra.ed)) { history.replaceState(screenNow(extra), ""); return; }
+      if (cur && cur.ml) history.replaceState(Object.assign({}, cur, { y: window.scrollY }), "");
+      history.pushState(screenNow(extra), "");
+      NAV.atBase = false;
+    } catch (e) { /* fine */ }
+  }
+  // What the Back button does, for the on-screen back buttons too.
+  function goBackOne() {
+    const st = history.state;
+    if (!NAV.on || !st || !st.ml || st.base) return false;
+    if (S.editing) { S.editing = null; S.attDraft = null; }
+    history.go(st.ed ? -2 : -1);
+    return true;
+  }
+  function onBack(e) {
+    if (NAV.ignore > 0) { NAV.ignore--; return; }   // our own step back after an editor closed
+    const st = e.state && e.state.ml ? e.state : null;
+    if (!st) return;
+    NAV.atBase = !!st.base;   // on the bottom step, the next tap adds a step back on top of it
+    const hadEditor = !!S.editing;
+    if (S.editing && !st.ed) { S.editing = null; S.attDraft = null; }   // Back closes an editor without saving, like Cancel
+    const tab = TABS.includes(st.tab) ? st.tab : "fleet";
+    const id = st.openId && S.units.has(st.openId) ? st.openId : null;
+    const moved = tab !== S.tab || id !== (S.openId || null);
+    if (!moved) { if (hadEditor) renderDetail(); rootWatch(); return; }
+    S.tab = tab; lsSet("tab", tab);
+    S.openId = id;
+    S.confirmReset = false;
+    render();
+    window.scrollTo(0, typeof st.y === "number" ? st.y : 0);
+    const pl = document.querySelector(".pane-list"); if (pl && !id) pl.scrollTop = 0;
+    rootWatch();
+  }
+  // Closing an editor with Save or Cancel takes its step back off, so the next Back goes to the list.
+  function endEdit() {
+    S.editing = null; S.attDraft = null;
+    if (NAV.on && history.state && history.state.ml && history.state.ed) { NAV.ignore++; history.back(); }
+  }
+  // On the main list, Chrome on Android also lets the app swallow a Back press outright.
+  function rootWatch() {
+    const atRoot = NAV.on && S.phase === "app" && S.tab === "fleet" && !S.openId && !S.editing;
+    if (atRoot && !NAV.rootW && typeof window.CloseWatcher === "function") {
+      try {
+        const w = new window.CloseWatcher();
+        w.addEventListener("cancel", ev => { if (ev.cancelable) ev.preventDefault(); });
+        w.addEventListener("close", () => { if (NAV.rootW === w) NAV.rootW = null; setTimeout(rootWatch, 0); });
+        NAV.rootW = w;
+      } catch (err) { NAV.rootW = null; }
+    } else if (!atRoot && NAV.rootW) {
+      const w = NAV.rootW;
+      NAV.rootW = null;
+      try { w.destroy(); } catch (err) { /* already gone */ }
+    }
+  }
+
   // ---------------------------------------------------------------- navigation
   function setTab(t) {
+    if (!TABS.includes(t)) t = "fleet";
+    if (t === S.tab && (!S.openId || window.innerWidth >= 980)) { window.scrollTo(0, 0); return; }   // already there
+    S.editing = null; S.attDraft = null;
     S.tab = t; lsSet("tab", t);
     S.confirmReset = false;
     if (window.innerWidth < 980 && S.openId) closeUnit(true);
+    navPush();
     render();
     window.scrollTo(0, 0);
     const pl = document.querySelector(".pane-list"); if (pl) pl.scrollTop = 0;
+    rootWatch();
   }
   function openUnit(id) {
-    if (!S.units.has(id)) return;
+    if (!S.units.has(id) || id === S.openId) return;
     if (!S.openId) S.listScroll = window.scrollY;
-    S.openId = id; S.editing = null; S.attDraft = null;
+    S.editing = null; S.attDraft = null;
+    S.openId = id;
+    navPush();
     render();
     if (window.innerWidth < 980) window.scrollTo(0, 0);
     else { const d = $("#detail"); if (d) d.scrollTop = 0; }
+    rootWatch();
   }
   function closeUnit(silent) {
     S.openId = null; S.editing = null; S.attDraft = null;
     if (silent) return;
     render();
     window.scrollTo(0, S.listScroll || 0);
+    rootWatch();
   }
   function startEdit(obj) {
     if (S.readOnly) return;
+    const fresh = !S.editing;
     S.editing = Object.assign({ focus: true }, obj);
+    if (fresh) navPush({ ed: 1 });
     renderDetail();
+    rootWatch();
   }
 
   // ---------------------------------------------------------------- events
@@ -1463,13 +1566,21 @@
     }
     const t = e.target.closest("[data-tab],[data-open],[data-cat],[data-st],[data-chf],[data-action]");
     if (!t) return;
-    if (t.dataset.tab) return setTab(t.dataset.tab === "me" && S.tab === "me" ? "fleet" : t.dataset.tab);
+    if (t.dataset.tab) {
+      // The person button opens and closes the You screen; closing it goes back where you were.
+      if (t.dataset.tab === "me" && S.tab === "me") { if (!goBackOne()) setTab("fleet"); return; }
+      return setTab(t.dataset.tab);
+    }
     if (t.dataset.open) return openUnit(t.dataset.open);
     if (t.dataset.cat) { S.cat = t.dataset.cat; lsSet("cat", S.cat); return renderFleet(); }
     if (t.dataset.st) { S.st = S.st === t.dataset.st ? "all" : t.dataset.st; return renderFleet(); }
     if (t.dataset.chf) { S.chFilter = t.dataset.chf; return renderChanges(); }
     const a = t.dataset.action;
-    if (a === "close") return closeUnit();
+    if (a === "close") {   // "All units" works like Back
+      const st = history.state;
+      if (NAV.on && st && st.ml && !st.base && st.openId === S.openId && goBackOne()) return;
+      return closeUnit();
+    }
     if (a === "clear-filters") { S.q = ""; S.cat = "all"; S.st = "all"; $("#q").value = ""; lsSet("cat", "all"); return renderFleet(); }
     if (a === "edit") return startEdit({ type: "field", key: t.dataset.key });
     if (a === "hours") return startEdit({ type: "hours" });
@@ -1490,7 +1601,7 @@
       S.editing.focus = true; renderDetail(); return;
     }
     if (a === "confirm") return confirmField(t.dataset.key);
-    if (a === "cancel") { S.editing = null; S.attDraft = null; renderDetail(); if (S.detailStale) render(); return; }
+    if (a === "cancel") { endEdit(); renderDetail(); if (S.detailStale) render(); rootWatch(); return; }
     if (a === "approve") return setApproval([t.dataset.id], true);
     if (a === "unapprove") return setApproval([t.dataset.id], false);
     if (a === "approve-all") return approveAll();
@@ -1552,7 +1663,7 @@
       else if (e.key === "Backspace") { e.preventDefault(); pinKey("del"); }
       return;
     }
-    if (e.key === "Escape" && S.editing) { S.editing = null; S.attDraft = null; renderDetail(); }
+    if (e.key === "Escape" && S.editing) { endEdit(); renderDetail(); }
     if (e.key === "Enter" && e.target.id === "ed-att") { e.preventDefault(); const val = e.target.value.trim(); if (val && S.attDraft.length < 6) { S.attDraft.push(val); S.editing.focus = true; renderDetail(); } }
   });
   document.addEventListener("toggle", e => {
@@ -1564,6 +1675,6 @@
   $("#q").addEventListener("input", e => { S.q = e.target.value; renderFleet(); });
 
   // for the local test harness only
-  window.__ML = { S, D, L, sync, reloadFromDb };
+  window.__ML = { S, D, L, NAV, sync, reloadFromDb };
   init();
 })();
