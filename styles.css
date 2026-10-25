@@ -429,3 +429,6 @@ body.locked > header, body.locked > main { visibility: hidden; }
   .appbar-in > .brand { margin-right: 6px; }
 }
 @media (max-width: 759px) { .appbar-in > .brand { flex: 1 1 0; min-width: 0; } }
+
+/* Fleet list: a sideways swipe steps through the equipment tabs (the tab row above still scrolls sideways) */
+#fleetBody, #summary { touch-action: pan-y pinch-zoom; }

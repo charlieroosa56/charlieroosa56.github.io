@@ -1,7 +1,7 @@
 /* Machine List background helper. It keeps a copy of the app on this phone so the app opens with no
    signal, and on Android it sends waiting updates by itself once there's service, even with the app closed.
    The build fills in the version and file list below; a new version replaces the old copy. */
-self.ML_VERSION = "2026.10.25-8af05e";
+self.ML_VERSION = "2026.10.25-774422";
 importScripts("sync-core.js");
 
 const CACHE = "ml-" + self.ML_VERSION;

@@ -670,12 +670,117 @@
     try { return window.matchMedia("(hover: hover) and (pointer: fine)").matches; } catch (e) { return false; }
   }
   // On a phone the tabs are one row you swipe; when the app opens on a tab further along, bring it into view.
-  function showPressedChip(row) {
+  function showPressedChip(row, smooth) {
     const on = row.querySelector('[aria-pressed="true"]');
     if (!on || row.classList.contains("wrap")) return;
     const a = row.getBoundingClientRect(), b = on.getBoundingClientRect();
-    if (b.left < a.left || b.right > a.right) row.scrollLeft += b.left - a.left - 16;
+    if (b.left >= a.left + 4 && b.right <= a.right - 4) return;
+    const left = Math.max(0, row.scrollLeft + (b.left - a.left) - (a.width - b.width) / 2);   // in the middle, so the next ones show too
+    if (smooth && typeof row.scrollTo === "function") row.scrollTo({ left, behavior: reducedMotion() ? "auto" : "smooth" });
+    else row.scrollLeft = left;
   }
+  function reducedMotion() {
+    try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { return false; }
+  }
+
+  // Swiping on the Fleet list steps through the equipment tabs, like flipping pages: finger to the left for the
+  // next one (All, Mini Excavators, Zero Turn, Counterweight, Dump Trucks…), to the right to go back.
+  // The tab row itself still scrolls sideways as before, and an up-and-down swipe still scrolls the list.
+  const SW = { on: false, x: 0, y: 0, t: 0, dx: 0, lock: "", until: 0, pts: [] };
+  const fleetCats = () => [...document.querySelectorAll("#whoChips [data-cat]")].map(b => b.dataset.cat);
+  function swipeStart(e) {
+    SW.on = false;
+    if (S.phase !== "app" || S.tab !== "fleet" || L.open || !e.touches || e.touches.length !== 1) return;
+    if (S.openId && window.innerWidth < 980) return;
+    if (e.target.closest && e.target.closest("#whoChips, input, textarea, select, .editor")) return;
+    const p = e.touches[0];
+    if (p.clientX < 16 || p.clientX > window.innerWidth - 16) return;   // the phone's own edge swipe (Back)
+    Object.assign(SW, { on: true, x: p.clientX, y: p.clientY, t: Date.now(), dx: 0, lock: "", pts: [[Date.now(), p.clientX]] });
+  }
+  function swipeMove(e) {
+    if (!SW.on || !e.touches || e.touches.length !== 1) return;
+    const p = e.touches[0], dx = p.clientX - SW.x, dy = p.clientY - SW.y;
+    if (!SW.lock) {
+      if (Math.abs(dx) < 12 && Math.abs(dy) < 12) return;
+      SW.lock = Math.abs(dx) > Math.abs(dy) * 1.4 ? "x" : "y";
+      if (SW.lock === "y") { SW.on = false; return; }   // scrolling up or down: leave it alone
+    }
+    if (e.cancelable) e.preventDefault();
+    SW.dx = dx;
+    SW.pts.push([Date.now(), p.clientX]);
+    if (SW.pts.length > 8) SW.pts.shift();
+    const i = fleetCats().indexOf(S.cat), j = i + (dx < 0 ? 1 : -1);
+    const end = i < 0 || j < 0 || j >= fleetCats().length;
+    dragFleet(dx * (end ? 0.15 : 0.45), false);
+  }
+  function swipeEnd() {
+    if (!SW.on) return;
+    SW.on = false;
+    if (SW.lock !== "x") return;
+    const now = Date.now();
+    SW.until = now + 400;   // the lift at the end of a swipe never opens a unit
+    const dx = SW.dx;
+    // How fast the finger was going at the end (over the last tenth of a second or so): a quick flick counts too.
+    const recent = SW.pts.filter(q => now - q[0] <= 120);
+    const a = recent[0] || SW.pts[0], b = SW.pts[SW.pts.length - 1];
+    const speed = a && b && b[0] > a[0] ? (b[1] - a[1]) / (b[0] - a[0]) : 0;
+    const far = Math.abs(dx) >= Math.min(80, window.innerWidth * 0.2) || (Math.abs(dx) >= 36 && Math.abs(speed) > 0.35 && Math.sign(speed) === Math.sign(dx));
+    stepFleet(far ? (dx < 0 ? 1 : -1) : 0);
+  }
+  function swipeCancel() { if (SW.on && SW.lock === "x") stepFleet(0); SW.on = false; }
+  function dragFleet(x, animate) {
+    const body = $("#fleetBody");
+    if (!body) return;
+    body.style.transition = animate && !reducedMotion() ? "transform .2s ease, opacity .2s ease" : "none";
+    body.style.transform = x ? `translateX(${Math.round(x)}px)` : "";
+    body.style.opacity = x ? String(Math.max(0.5, 1 - Math.abs(x) / 500)) : "";
+  }
+  // Move to the next (1) or previous (-1) equipment tab, or spring back (0).
+  function stepFleet(step) {
+    const cats = fleetCats(), i = cats.indexOf(S.cat), j = i + step;
+    if (!step || i < 0 || j < 0 || j >= cats.length) { dragFleet(0, true); return false; }
+    S.cat = cats[j]; lsSet("cat", S.cat);
+    renderFleet();
+    const row = $("#whoChips");
+    if (row) showPressedChip(row, true);
+    keepChipsInView();
+    const body = $("#fleetBody");
+    if (body && !reducedMotion()) {   // the new list slides in from the side you're heading to
+      body.style.transition = "none";
+      body.style.transform = `translateX(${step > 0 ? 56 : -56}px)`;
+      body.style.opacity = "0.3";
+      void body.offsetWidth;
+      body.style.transition = "transform .24s cubic-bezier(.2,.75,.3,1), opacity .2s ease";
+      body.style.transform = "";
+      body.style.opacity = "";
+    } else dragFleet(0, false);
+    return true;
+  }
+  // After a swipe from far down the list, scroll back up to where the new list starts.
+  function keepChipsInView() {
+    const row = $("#whoChips");
+    if (!row || !row.offsetParent) return;
+    const behavior = reducedMotion() ? "auto" : "smooth";
+    const pane = document.querySelector(".pane-list");
+    if (pane && window.innerWidth >= 980) {
+      const off = row.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+      if (off < 0) pane.scrollBy({ top: off - 8, behavior });
+      return;
+    }
+    const bar = document.querySelector(".appbar");
+    const under = bar ? bar.getBoundingClientRect().bottom : 0;
+    const top = row.getBoundingClientRect().top;
+    if (top < under) window.scrollBy({ top: top - under - 10, behavior });
+  }
+  (function wireSwipes() {
+    const v = $("#view-fleet");
+    if (!v) return;
+    v.addEventListener("touchstart", swipeStart, { passive: true });
+    v.addEventListener("touchmove", swipeMove, { passive: false });
+    v.addEventListener("touchend", swipeEnd, { passive: true });
+    v.addEventListener("touchcancel", swipeCancel, { passive: true });
+    document.addEventListener("click", e => { if (Date.now() < SW.until) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+  })();
 
   // Notes at the top of the list: a new version of the app, or sync paused.
   function noticeCards() {
