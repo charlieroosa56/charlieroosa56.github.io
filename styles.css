@@ -432,3 +432,4 @@ body.locked > header, body.locked > main { visibility: hidden; }
 
 /* Fleet list: a sideways swipe steps through the equipment tabs (the tab row above still scrolls sideways) */
 #fleetBody, #summary { touch-action: pan-y pinch-zoom; }
+.prob-text .pill { margin-left: 6px; vertical-align: 2px; white-space: nowrap; }

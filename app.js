@@ -45,8 +45,10 @@
   const today = () => C.startOfToday();
   const unitsArr = () => [...S.units.values()].sort((a, b) => ((a.order ?? 999) - (b.order ?? 999)) || a.id.localeCompare(b.id));
   const nameOf = u => (u.v && u.v.name) || u.id;
-  const openProblems = id => S.problems.filter(p => p.unit === id && p.status !== "fixed");
+  const openProblems = id => S.problems.filter(p => p.unit === id && p.status === "open");
   const fixedProblems = id => S.problems.filter(p => p.unit === id && p.status === "fixed");
+  // Fuel flags and problem reports from a coworker sit on the Changes list too, but never go to the master sheet.
+  const isMasterChange = c => !/^(fuel$|prob:|fix:)/.test(String((c && c.key) || ""));
   const needsFuel = u => !!(u.fuel && u.fuel.needs);
   const hasFuel = u => C.applies(u, "ENG");
   const firstName = n => String(n || "").trim().split(/\s+/)[0] || "";
@@ -115,6 +117,7 @@
     const c = D.config || {};
     C.configure(c);
     S.me.name = c.name || "Me";
+    S.me.isOwner = c.role !== "crew";   // a coworker's code: everything they send waits for the owner's approval
     const mark = $("#brandMark"), name = $("#brandName");
     if (mark) mark.textContent = c.mark || "ML";
     if (name) name.textContent = c.brand || "Machine List";
@@ -134,11 +137,18 @@
           label: l.label, key: l.key, from: l.from, to: l.to, approval: "", synced: "", note: l.kind === "confirm" ? "Confirmed" : "", pending: true }));
       } else if (op.t === "fuel") {
         const u = units.get(op.unit); if (!u) return;
+        const before = !!(u.fuel && u.fuel.needs);
         units.set(op.unit, Object.assign({}, u, { fuel: { needs: op.needs, at: op.at, by: S.me.name } }));
+        if (!S.me.isOwner) pend.push(crewPending(op, op.unit, op.unitName || nameOf(u), "Fuel", before ? "Yes" : "No", op.needs ? "Yes" : "No", "fuel"));
       } else if (op.t === "prob") {
         problems.unshift({ id: op.pid, at: op.at, by: S.me.name, unit: op.unit, unitName: op.unitName, text: op.text, status: "open", pending: true });
+        if (!S.me.isOwner) pend.push(crewPending(op, op.unit, op.unitName, "Problem", "", op.text, "prob:" + op.pid));
       } else if (op.t === "fix") {
+        const pr = problems.find(p => p.id === op.pid);
         problems = problems.map(p => (p.id === op.pid ? Object.assign({}, p, { status: "fixed", fixedAt: op.at, fixedBy: S.me.name }) : p));
+        if (!S.me.isOwner && pr) pend.push(crewPending(op, pr.unit, pr.unitName, "Problem", pr.text, "Fixed", "fix:" + op.pid));
+      } else if (op.t === "probx") {
+        problems = problems.map(p => (p.id === op.pid ? Object.assign({}, p, op.val === "Declined" ? { status: "declined" } : { status: "open", fixedAt: "", fixedBy: "" }) : p));
       } else if (op.t === "approve") {
         (op.cids || []).forEach(id => appr.set(id, op.val));
       } else if (op.t === "copied") {
@@ -161,6 +171,11 @@
     S.units = units; S.changes = changes; S.problems = problems;
     S.unitsLoaded = S.changesLoaded = S.problemsLoaded = D.loaded;
     if (S.openId && !S.units.has(S.openId)) S.openId = null;
+  }
+
+  // A coworker's fuel flag, problem report or Mark fixed, shown on the Changes list while it sends (same ID the sheet uses).
+  function crewPending(op, unit, unitName, label, from, to, key) {
+    return { id: "C" + String(op.id).slice(1), at: op.at, by: S.me.name, unit, unitName, section: "", label, key, from, to, approval: "", synced: "", note: "", pending: true };
   }
 
   function queueOp(op) {
@@ -334,7 +349,7 @@
     if (!res || !res.ok || !res.state) {
       setFormBusy(form, false);
       if (btn) btn.textContent = "Connect";
-      return showWarn(form, "setupWarn", res && res.error === "bad_key" ? "That code doesn't match the one on your sheet's Settings tab."
+      return showWarn(form, "setupWarn", res && res.error === "bad_key" ? "That code doesn't work. Check it and try again."
         : "Your sheet had a problem" + (res && res.message ? ": " + res.message : "") + ". Try again in a minute.");
     }
     const setup = { key: code, url: CFG.syncUrl, device, at: Date.now() };
@@ -405,7 +420,7 @@
       el.innerHTML = `<div class="lock-card">
         <div class="brand-mark lg" aria-hidden="true">${mark}</div>
         <h2>Forgot your PIN?</h2>
-        <p class="lock-sub">Type your setup code to pick a new one. It's on the Settings tab of your Machine List sheet.</p>
+        <p class="lock-sub">Type this phone's setup code to pick a new PIN.</p>
         <form class="editor" data-form="forgot" autocomplete="off">
           <label for="forgotCode">Setup code<input id="forgotCode" name="code" class="code-input" type="text" autocapitalize="characters" autocorrect="off" spellcheck="false" maxlength="14" placeholder="XXXX-XXXX-XXXX"></label>
           <p class="warn" id="forgotWarn" hidden></p>
@@ -477,7 +492,7 @@
 
   function forgotPin(form) {
     const code = normKey(form.elements.code.value);
-    if (!D.setup || code !== normKey(D.setup.key)) return showWarn(form, "forgotWarn", "That's not the setup code. It's on the Settings tab of your sheet.");
+    if (!D.setup || code !== normKey(D.setup.key)) return showWarn(form, "forgotWarn", "That's not this phone's setup code.");
     L.mode = "new"; L.entry = ""; L.first = ""; L.msg = "Pick your new PIN."; L.bad = false;
     renderLock();
   }
@@ -491,6 +506,8 @@
     $("#meBtn").hidden = !ready;
     renderHeader();
     if (!ready) { if (S.phase === "setup") renderSignin(); return; }
+    if (!S.me.isOwner && S.tab === "approved") S.tab = "fleet";
+    $("#tab-approved").hidden = !S.me.isOwner;
     ["fleet", "due", "changes", "approved"].forEach(t => {
       $("#tab-" + t).setAttribute("aria-selected", String(S.tab === t));
     });
@@ -535,7 +552,11 @@
     dc.textContent = String(over + soon);
     dc.classList.toggle("hot", over > 0);
     let w = 0, ap = 0;
-    S.changes.forEach(c => { const s = changeState(c); if (s === "waiting") w++; else if (s === "approved") ap++; });
+    S.changes.forEach(c => {
+      if (!S.me.isOwner && c.by !== S.me.name) return;   // a coworker counts their own
+      const s = changeState(c);
+      if (s === "waiting") w++; else if (s === "approved" && isMasterChange(c)) ap++;
+    });
     const cc = $("#chCount");
     cc.hidden = !w;
     cc.textContent = String(w);
@@ -572,7 +593,7 @@
       html += `<p class="muted">Tip: put it on your home screen so it opens like an app.${S.installEvt ? "" : " " + (isAndroid() ? "In Chrome, tap ⋮, then <b>Add to Home screen</b>." : "")}</p>`;
       if (S.installEvt) html += `<div class="row-actions"><button class="btn" type="button" data-action="install">Add to home screen</button></div>`;
     }
-    html += `<p>Type your setup code. It's on the <b>Settings</b> tab of your <b>Machine List</b> sheet. You only do this once on each phone, and it needs signal to download your machines.</p>
+    html += `<p>Type the setup code you were given. You only do this once on each phone, and it needs signal to download the machines.</p>
       <form class="editor" data-form="setup" autocomplete="off">
         <label for="setupCode">Setup code<input id="setupCode" name="code" class="code-input" type="text" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" maxlength="14" placeholder="XXXX-XXXX-XXXX"></label>
         <p class="warn" id="setupWarn" hidden></p>
@@ -786,7 +807,7 @@
   function noticeCards() {
     let html = "";
     if (S.update) html += `<div class="card card-pad notice upd"><p><b>A new version of the app is ready.</b> Reload to use it. Nothing you saved is lost.</p><button class="btn small primary" type="button" data-action="reload-app">Reload</button></div>`;
-    if (S.keyBad) html += `<div class="card card-pad notice paused"><p><b>Sync is paused.</b> The setup code on your sheet changed. Everything's still saved on this phone.</p><button class="btn small" type="button" data-tab="me">Fix it</button></div>`;
+    if (S.keyBad) html += `<div class="card card-pad notice paused"><p><b>Sync is paused.</b> This phone's setup code was changed or turned off. Everything's still saved on this phone.</p><button class="btn small" type="button" data-tab="me">Fix it</button></div>`;
     return html;
   }
 
@@ -877,6 +898,10 @@
     return String(v);
   }
   function changeDiff(c, from, to) {
+    const key = String(c.key || "");
+    if (key === "fuel") return `<span class="to">${c.to === "Yes" ? "Needs fuel" : "Fueled"}</span>`;
+    if (key.startsWith("prob:")) return `<span class="to">Reported: ${esc(c.to)}</span>`;
+    if (key.startsWith("fix:")) return `<span class="to">Marked fixed: ${esc(c.from)}</span>`;
     if (c.note === "Confirmed") return `<span class="to">Confirmed: ${esc(to)}</span>`;
     return `<span class="from">${esc(from || "empty")}</span><span class="arrow" aria-label="changed to">→</span><span class="to">${esc(to || "cleared")}</span>`;
   }
@@ -890,16 +915,18 @@
 
   function renderChanges() {
     const el = $("#view-changes");
-    const all = S.changes.map(c => Object.assign({ state: changeState(c) }, c));
+    const mine = S.me.isOwner ? S.changes : S.changes.filter(c => c.by === S.me.name);   // a coworker sees their own
+    const all = mine.map(c => Object.assign({ state: changeState(c) }, c));
     const n = st => all.filter(c => c.state === st).length;
     const filters = [["waiting", "Waiting"], ["declined", "Declined"], ["synced", "Sent"], ["all", "All"]];
     if (!filters.some(f => f[0] === S.chFilter)) S.chFilter = "waiting";
     const shown = S.chFilter === "all" ? all : all.filter(c => c.state === S.chFilter);
     const owner = S.me.isOwner && !S.readOnly;
     const more = D.changesTotal > D.changes.length ? D.changesTotal - D.changes.length : 0;
-    const nAp = n("approved");
+    const nAp = owner ? all.filter(c => c.state === "approved" && isMasterChange(c)).length : 0;
     let html = `<div class="card card-pad intro">
-      <p>Every change to a unit's details shows up here first. <b>Approve</b> the ones you want in the master sheet, or <b>decline</b> one that was a mistake. Approved changes wait on the <button class="link" type="button" data-tab="approved">Approved</button> tab until you send them.</p>
+      ${owner ? `<p>Every change to a unit's details shows up here first, and so do fuel flags and problems from the crew. <b>Approve</b> the ones you want, or <b>decline</b> one that was a mistake. Approved details wait on the <button class="link" type="button" data-tab="approved">Approved</button> tab until you send them to the master sheet.</p>`
+        : `<p>Your changes, fuel flags and problem reports show up here. Each one waits for approval, and you can see here when it's approved or declined.</p>`}
       ${owner && n("waiting") ? `<div class="row-actions"><button class="btn primary" data-action="approve-all">Approve all waiting (${n("waiting")})</button></div>` : ""}
     </div>
     <div class="chips" role="group" aria-label="Show changes: waiting, declined, sent to the master sheet, or all">${filters.map(([k, l]) =>
@@ -928,7 +955,7 @@
           ${acts ? `<div class="row-actions">${acts}</div>` : ""}
         </div>`;
       }).join("")}</section>`;
-      if (more && S.chFilter === "all") html += `<p class="muted small" style="margin:0 2px">Showing the latest ${D.changes.length}. The other ${more} are on the Changes tab of your sheet.</p>`;
+      if (more && S.chFilter === "all" && owner) html += `<p class="muted small" style="margin:0 2px">Showing the latest ${D.changes.length}. The other ${more} are on the Changes tab of your sheet.</p>`;
     }
     el.innerHTML = html;
   }
@@ -946,7 +973,7 @@
   function approvedGroups() {
     const groups = new Map();
     S.changes.forEach(c => {   // newest first
-      if (changeState(c) !== "approved") return;
+      if (changeState(c) !== "approved" || !isMasterChange(c)) return;
       const k = c.unit + "\u0001" + (c.key || c.label);
       let g = groups.get(k);
       if (!g) { g = { unit: c.unit, key: c.key || "", items: [] }; groups.set(k, g); }
@@ -1020,7 +1047,7 @@
     if (S.keyBad) {
       html += `<section class="card card-pad me-card">
         <div class="eyebrow">Sync is paused</div>
-        <p>The setup code on your sheet's Settings tab changed, so this phone can't sync until you type the new one. Everything's still saved here${waiting ? `, including ${waiting} update${waiting === 1 ? "" : "s"} waiting to send` : ""}.</p>
+        <p>This phone's setup code was changed or turned off, so it can't sync until you type the new one. Everything's still saved here${waiting ? `, including ${waiting} update${waiting === 1 ? "" : "s"} waiting to send` : ""}.</p>
         <form class="editor" data-form="newkey" autocomplete="off">
           <label for="newKey">New setup code<input id="newKey" name="code" class="code-input" type="text" autocapitalize="characters" autocorrect="off" spellcheck="false" maxlength="14" placeholder="XXXX-XXXX-XXXX"></label>
           <p class="warn" id="newKeyWarn" hidden></p>
@@ -1030,7 +1057,7 @@
     }
     html += `<section class="card card-pad me-card">
       <div class="eyebrow">On this phone</div>
-      <div class="me-name">${esc(S.me.name || "Me")}<span class="pill ok">Private</span></div>
+      <div class="me-name">${esc(S.me.name || "Me")}<span class="pill ok">${S.me.isOwner ? "Private" : "Crew"}</span></div>
       <p>Everything is saved right here, so the app works with no signal. What you add goes to your sheet by itself when you have service.</p>
       <dl class="sync-lines">
         <div><dt>Waiting to send</dt><dd class="${waiting ? "wait" : "ok"}">${waiting ? waiting + " update" + (waiting === 1 ? "" : "s") : "Nothing, all sent"}</dd></div>
@@ -1070,7 +1097,7 @@
     let res;
     try { res = await M.post(D.setup.url, { key: code, device: D.setup.device, app: VERSION, ver: D.ver, full: false, ops: [] }, 45000); }
     catch (e) { setFormBusy(form, false); return showWarn(form, "newKeyWarn", "Couldn't reach your sheet. Check your signal and try again."); }
-    if (!res || !res.ok) { setFormBusy(form, false); return showWarn(form, "newKeyWarn", res && res.error === "bad_key" ? "That code doesn't match your sheet's Settings tab." : "Your sheet had a problem. Try again in a minute."); }
+    if (!res || !res.ok) { setFormBusy(form, false); return showWarn(form, "newKeyWarn", res && res.error === "bad_key" ? "That code doesn't work." : "Your sheet had a problem. Try again in a minute."); }
     D.setup = Object.assign({}, D.setup, { key: code });
     await M.set("setup", D.setup);
     S.keyBad = false;
@@ -1289,10 +1316,17 @@
   }
 
   function problemItem(p, open) {
+    // A coworker's problem report (or their Mark fixed) waits for approval: say so, and let the owner decide right here.
+    const rep = S.changes.find(c => c.key === (open ? "prob:" : "fix:") + p.id);
+    const waiting = !!rep && changeState(rep) === "waiting";
+    const owner = S.me.isOwner && !S.readOnly;
+    let acts = "";
+    if (waiting && owner) acts = `<button class="btn small primary" data-action="approve" data-id="${esc(rep.id)}">Approve</button><button class="btn small decline" data-action="decline" data-id="${esc(rep.id)}">Decline</button>`;
+    if (open && !S.readOnly) acts += `<button class="btn small" data-action="prob-fixed" data-id="${esc(p.id)}">Mark fixed</button>`;
     return `<div class="prob-item">
-      <p class="prob-text">${esc(p.text)}</p>
+      <p class="prob-text">${esc(p.text)}${waiting ? ` <span class="pill need">Waiting for approval</span>` : ""}</p>
       <div class="prob-meta">Reported ${esc(whenText(p.at))} · ${esc(whoName(p.by))}${p.pending ? (isOffline() ? " · saved on this phone, will send" : " · sending…") : ""}${!open && p.fixedAt ? ` · fixed ${esc(whenText(p.fixedAt))} · ${esc(whoName(p.fixedBy))}` : ""}</div>
-      ${open && !S.readOnly ? `<div class="row-actions"><button class="btn small" data-action="prob-fixed" data-id="${esc(p.id)}">Mark fixed</button></div>` : ""}
+      ${acts ? `<div class="row-actions">${acts}</div>` : ""}
     </div>`;
   }
 
@@ -1449,6 +1483,7 @@
   function setFormBusy(form, busy) { if (form) form.querySelectorAll("button").forEach(b => { b.disabled = busy; }); }
   const canWrite = () => { if (S.readOnly) { toast("This copy can look but can't save changes."); return false; } return true; };
   const offlineNote = () => (isOffline() ? " No signal right now, so it's saved on this phone and will send on its own." : "");
+  const crewNote = () => (S.me.isOwner ? "" : " It's waiting for approval.");
 
   function commit(u, patch, changes, msg) {
     if (!canWrite()) return false;
@@ -1460,6 +1495,7 @@
     queueOp({ t: "unit", unit: u.id, unitName, patch, log });
     endEdit();
     render();
+    if (!S.me.isOwner) msg = (msg || "Saved.") + " It's waiting for approval.";
     toast((msg || "Saved. Approve it under Changes when you want it in the master sheet.") + offlineNote());
     return true;
   }
@@ -1607,14 +1643,14 @@
     queueOp({ t: "prob", pid: newId("P"), unit: u.id, unitName: nameOf(u), text });
     endEdit();
     render();
-    toast(`Problem reported. ${nameOf(u)} shows orange in the list until it's marked fixed.` + offlineNote());
+    toast(`Problem reported. ${nameOf(u)} shows orange in the list until it's marked fixed.` + crewNote() + offlineNote());
   }
 
   function markFixed(pid) {
     if (!canWrite()) return;
     queueOp({ t: "fix", pid });
     render();
-    toast("Marked fixed." + offlineNote());
+    toast("Marked fixed." + crewNote() + offlineNote());
   }
 
   function toggleFuel() {
@@ -1622,7 +1658,7 @@
     const on = !needsFuel(u);
     queueOp({ t: "fuel", unit: u.id, needs: on });
     render();
-    toast((on ? `Flagged ${nameOf(u)} as needing fuel.` : `Marked ${nameOf(u)} as fueled.`) + offlineNote());
+    toast((on ? `Flagged ${nameOf(u)} as needing fuel.` : `Marked ${nameOf(u)} as fueled.`) + crewNote() + offlineNote());
   }
 
   function setApproval(ids, approved) {
@@ -1679,21 +1715,46 @@
     return patch ? { t: "unit", unit: u.id, unitName: nameOf(u), patch, log: [] } : null;
   }
 
+  // A coworker's fuel flag or problem: declining it undoes it (the flag goes back, the problem report comes off,
+  // a problem they marked fixed opens again); undoing the decline puts it back.
+  function crewUndo(c, undo) {
+    const key = String(c.key || "");
+    const u = S.units.get(c.unit);
+    if (key === "fuel") {
+      const newer = S.changes.some(x => x.id !== c.id && x.unit === c.unit && x.key === "fuel" && String(x.at) > String(c.at) && !["stale", "declined"].includes(changeState(x)));
+      const want = (undo ? c.from : c.to) === "Yes";
+      if (!u || newer || needsFuel(u) !== want) return null;
+      return { t: "fuel", unit: u.id, needs: !want };
+    }
+    const pid = key.slice(key.indexOf(":") + 1);
+    const p = S.problems.find(x => x.id === pid);
+    if (!p) return null;
+    if (key.startsWith("prob:")) return undo ? (p.status === "declined" ? { t: "probx", pid, val: "Open" } : null) : (p.status !== "declined" ? { t: "probx", pid, val: "Declined" } : null);
+    if (key.startsWith("fix:")) return undo ? (p.status === "open" ? { t: "fix", pid } : null) : (p.status === "fixed" ? { t: "probx", pid, val: "Open" } : null);
+    return null;
+  }
   function declineChange(id) {
     const c = findChange(id);
     if (!S.me.isOwner || !c || !["waiting", "approved"].includes(changeState(c))) return;
-    const back = fieldBack(c, c.from, c.to);
+    const crewItem = !isMasterChange(c);
+    const back = crewItem ? crewUndo(c, false) : fieldBack(c, c.from, c.to);
     queueOp({ t: "approve", cids: [id], val: "Declined" });
     if (back) queueOp(back);
     render();
-    const u = S.units.get(c.unit), shown = fmtChangeVal(c, c.from);
-    toast(back ? `Declined. ${c.label || "That field"} on ${u ? nameOf(u) : c.unit} is back to ${shown || "empty"}.` : "Declined. It won't go to the master sheet.");
+    const u = S.units.get(c.unit), shown = fmtChangeVal(c, c.from), name = u ? nameOf(u) : c.unit;
+    if (crewItem) {
+      const what = c.key === "fuel" ? (c.to === "Yes" ? `The fuel flag on ${name} is off.` : `${name} is flagged as needing fuel again.`)
+        : c.key.startsWith("prob:") ? `That problem report is off ${name}.` : `That problem on ${name} is open again.`;
+      toast("Declined. " + (back ? what : "Nothing else to undo."));
+      return;
+    }
+    toast(back ? `Declined. ${c.label || "That field"} on ${name} is back to ${shown || "empty"}.` : "Declined. It won't go to the master sheet.");
   }
   function undoDecline(id) {
     const c = findChange(id);
     if (!S.me.isOwner || !c || changeState(c) !== "declined") return;
     queueOp({ t: "approve", cids: [id], val: "" });
-    const again = fieldBack(c, c.to, c.from);   // decline had put the old value back: use this one again
+    const again = isMasterChange(c) ? fieldBack(c, c.to, c.from) : crewUndo(c, true);   // decline had undone it: put it back
     if (again) queueOp(again);
     render();
     toast("Back to waiting for approval.");
@@ -1821,7 +1882,7 @@
     NAV.atBase = !!st.base;   // on the bottom step, the next tap adds a step back on top of it
     const hadEditor = !!S.editing;
     if (S.editing && !st.ed) { S.editing = null; S.attDraft = null; }   // Back closes an editor without saving, like Cancel
-    const tab = TABS.includes(st.tab) ? st.tab : "fleet";
+    const tab = TABS.includes(st.tab) && !(st.tab === "approved" && !S.me.isOwner) ? st.tab : "fleet";
     const id = st.openId && S.units.has(st.openId) ? st.openId : null;
     const moved = tab !== S.tab || id !== (S.openId || null);
     if (!moved) { if (hadEditor) renderDetail(); rootWatch(); return; }
@@ -1857,7 +1918,7 @@
 
   // ---------------------------------------------------------------- navigation
   function setTab(t) {
-    if (!TABS.includes(t)) t = "fleet";
+    if (!TABS.includes(t) || (t === "approved" && !S.me.isOwner)) t = "fleet";
     if (t === S.tab && (!S.openId || window.innerWidth >= 980)) { window.scrollTo(0, 0); return; }   // already there
     S.editing = null; S.attDraft = null;
     S.tab = t; lsSet("tab", t);
