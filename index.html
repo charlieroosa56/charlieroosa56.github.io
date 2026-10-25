@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Machine List</title>
+<meta name="description" content="Your machines, hours, service, parts and problems. Works with no signal.">
+<meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1A1E22" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Machines">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="format-detection" content="telephone=no">
+<meta name="robots" content="noindex, nofollow">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="fonts/fonts.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="appbar">
+  <div class="appbar-in">
+    <div class="brand">
+      <div class="brand-mark" id="brandMark" aria-hidden="true">ML</div>
+      <div><h1 id="brandName">Machine List</h1><p id="subline">Loading…</p></div>
+    </div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="App sections" hidden>
+      <button class="tab" role="tab" id="tab-fleet" data-tab="fleet" aria-selected="true">Fleet</button>
+      <button class="tab" role="tab" id="tab-due" data-tab="due" aria-selected="false">Due <span class="count" id="dueCount" hidden></span></button>
+      <button class="tab" role="tab" id="tab-changes" data-tab="changes" aria-selected="false">Changes <span class="count" id="chCount" hidden></span></button>
+      <button class="me-btn" id="meBtn" data-tab="me" aria-pressed="false" aria-label="You: sync, app lock and backup" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"></path></svg><span id="meName">Me</span>
+      </button>
+    </nav>
+  </div>
+</header>
+<main class="layout" id="layout" hidden>
+  <section class="pane-list" aria-label="Equipment lists">
+    <div id="view-fleet" class="stack">
+      <div class="tools">
+        <div class="summary" id="summary"></div>
+        <div class="search-wrap">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+          <input id="q" class="search" type="search" placeholder="Search name, make, bucket, serial…" aria-label="Search equipment" autocomplete="off">
+        </div>
+        <div class="chips" id="whoChips" role="group" aria-label="Show one kind of equipment"></div>
+      </div>
+      <div id="fleetBody" class="stack"></div>
+    </div>
+    <div id="view-due" class="stack" hidden></div>
+    <div id="view-changes" class="stack" hidden></div>
+    <div id="view-me" class="stack" hidden></div>
+  </section>
+  <section class="pane-detail" id="detail" aria-label="Unit details"></section>
+</main>
+<main class="signin" id="signin" hidden></main>
+<div class="lock" id="lock" role="dialog" aria-modal="true" aria-label="App lock" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<noscript><p style="padding:16px">Machine List needs JavaScript turned on.</p></noscript>
+<script src="version.js"></script>
+<script src="config.js"></script>
+<script src="core.js"></script>
+<script src="sync-core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
