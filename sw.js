@@ -1,7 +1,7 @@
 /* Machine List background helper. It keeps a copy of the app on this phone so the app opens with no
    signal, and on Android it sends waiting updates by itself once there's service, even with the app closed.
    The build fills in the version and file list below; a new version replaces the old copy. */
-self.ML_VERSION = "2026.10.25-aef78a";
+self.ML_VERSION = "2026.10.26-ab48cd";
 importScripts("sync-core.js");
 
 const CACHE = "ml-" + self.ML_VERSION;
@@ -28,6 +28,12 @@ const FILES = [
  "sync-core.js",
  "version.js"
 ];
+// It only answers for this app's own pages and files. Other apps on this site (Parts lives under /parts/)
+// have their own helper, so their pages and files go straight past this one.
+const SCOPE = new URL(self.registration.scope);
+const PAGES = new Set([SCOPE.pathname, SCOPE.pathname + "index.html"]);
+const OWN = new Set(FILES.map(f => new URL(f, SCOPE).pathname));
+const isOurPage = href => { try { return PAGES.has(new URL(href).pathname); } catch (e) { return false; } };
 
 self.addEventListener("install", event => {
   event.waitUntil((async () => {
@@ -52,6 +58,7 @@ self.addEventListener("fetch", event => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;   // the trip to your sheet always goes to the web
   if (req.mode === "navigate") {
+    if (!PAGES.has(url.pathname)) return;   // another app's page
     event.respondWith((async () => {
       const cache = await caches.open(CACHE);
       const page = await cache.match("index.html");
@@ -60,6 +67,7 @@ self.addEventListener("fetch", event => {
     })());
     return;
   }
+  if (!OWN.has(url.pathname)) return;   // not one of this app's files
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
     const hit = await cache.match(req, { ignoreSearch: true });
@@ -71,7 +79,7 @@ self.addEventListener("fetch", event => {
 self.addEventListener("sync", event => {
   if (event.tag !== "ml-push") return;
   event.waitUntil((async () => {
-    const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const wins = (await self.clients.matchAll({ type: "window", includeUncontrolled: true })).filter(w => isOurPage(w.url));
     if (wins.some(w => w.visibilityState === "visible")) return;   // an open app sends its own
     const r = await MLSync.withLock(() => MLSync.syncAll({ timeout: 40000 }));
     wins.forEach(w => w.postMessage({ t: "synced" }));
