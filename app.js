@@ -16,16 +16,18 @@
   const FUEL_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true">' + PUMP + '</svg>';
   const NOFUEL_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true">' + PUMP + '<path d="M2.5 2.5l19 19"/></svg>';
   const SHARE_SVG = '<svg class="share-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>';
+  const PIN_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.4"/></svg>';
+  const CLOCK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2"/><path d="M9.5 2.5h5"/></svg>';
   const POLL_MS = 120000;
   const STALE_RE = /^not used/i;
   const LOCK_CHOICES = [[0, "Every time I open it"], [15 * 60000, "After 15 minutes away"], [60 * 60000, "After an hour away"], [-1, "Never"]];
 
   const S = {
-    phase: "boot",   // boot | setup | app
+    phase: "boot",   // boot | setup | stuck (storage not answering, code saved) | app
     me: { name: "", isOwner: true }, readOnly: false,
     units: new Map(), unitsLoaded: false, changes: [], changesLoaded: false, problems: [], problemsLoaded: false,
-    tab: "fleet", q: "", cat: "all", st: "all", chFilter: "waiting",
-    openId: null, editing: null, detailStale: false, attDraft: null, showNA: false,
+    tab: "fleet", q: "", cat: "all", st: "all", chFilter: "waiting", tabOrder: [],
+    openId: null, adding: null, quick: null, editing: null, detailStale: false, attDraft: null, showNA: false,
     openSecs: new Set(["IDENTITY & STATUS"]), listScroll: 0,
     keyBad: false, update: false, confirmReset: false, installEvt: null, storageError: false,
     sendState: null, sendSkips: {}   // sending approved changes to the master sheet: null | "confirm" | "busy"
@@ -123,18 +125,37 @@
     if (name) name.textContent = c.brand || "Machine List";
   }
 
+  // A unit added on this phone, as it looks before the sheet has it.
+  function unitFromAdd(op) {
+    const u = { att: [], code: op.code, g: C.CODE_G[op.code] || "HEQ", id: op.unit, kind: op.kind || "", order: op.order, svc: clone(op.svc || {}),
+      unconfirmed: [], v: Object.assign({}, op.v || {}, { status: "Active" }), born: op.born };
+    if (op.ext) u.ext = op.ext;
+    if (op.tpl) u.tpl = op.tpl;
+    return u;
+  }
+
   // The sheet's copy with this phone's waiting updates laid on top, so the screen shows them right away.
   function derive() {
     const units = new Map(D.units);
     const pend = [];
     let problems = D.problems.slice();
+    let tabOrder = Array.isArray(D.config && D.config.tabOrder) ? D.config.tabOrder : [];
     const appr = new Map(), copied = new Map();
+    const logPend = op => (op.log || []).forEach(l => pend.push({ id: l.cid, at: op.at, by: S.me.name, unit: op.unit, unitName: op.unitName || (op.v && op.v.name),
+      section: l.section, label: l.label, key: l.key, from: l.from, to: l.to, approval: "", synced: "", note: l.kind === "confirm" ? "Confirmed" : "", pending: true }));
     D.outbox.forEach(op => {
       if (op.t === "unit") {
         const u = units.get(op.unit); if (!u) return;
+        if (op.born && u.born !== op.born) return;   // meant for a unit this phone added that went in under another ID
         units.set(op.unit, merge(clone(u), op.patch || {}));
-        (op.log || []).forEach(l => pend.push({ id: l.cid, at: op.at, by: S.me.name, unit: op.unit, unitName: op.unitName, section: l.section,
-          label: l.label, key: l.key, from: l.from, to: l.to, approval: "", synced: "", note: l.kind === "confirm" ? "Confirmed" : "", pending: true }));
+        logPend(op);
+      } else if (op.t === "add") {
+        const u = units.get(op.unit);
+        if (u && u.born !== op.born) return;   // that ID was taken in the meantime; the sheet will say so
+        if (!u) units.set(op.unit, unitFromAdd(op));
+        logPend(op);
+      } else if (op.t === "taborder") {
+        if (Array.isArray(op.order)) tabOrder = op.order;
       } else if (op.t === "fuel") {
         const u = units.get(op.unit); if (!u) return;
         const before = !!(u.fuel && u.fuel.needs);
@@ -168,9 +189,18 @@
     }
     const pseen = new Set();
     problems = problems.filter(p => (pseen.has(p.id) ? false : (pseen.add(p.id), true)));
-    S.units = units; S.changes = changes; S.problems = problems;
+    S.units = units; S.changes = changes; S.problems = problems; S.tabOrder = tabOrder;
     S.unitsLoaded = S.changesLoaded = S.problemsLoaded = D.loaded;
     if (S.openId && !S.units.has(S.openId)) S.openId = null;
+    if (S.quick && !S.units.has(S.quick.id)) S.quick = null;
+  }
+
+  // The equipment tabs in the owner's order (press and hold a tab to move it); anything new goes at the end.
+  function groupOrder() {
+    const known = new Set(C.GROUP_ORDER), seen = new Set(), out = [];
+    (S.tabOrder || []).forEach(k => { if (known.has(k) && !seen.has(k)) { seen.add(k); out.push(k); } });
+    C.GROUP_ORDER.forEach(k => { if (!seen.has(k)) out.push(k); });
+    return out;
   }
 
   // A coworker's fuel flag, problem report or Mark fixed, shown on the Changes list while it sends (same ID the sheet uses).
@@ -179,7 +209,7 @@
   }
 
   function queueOp(op) {
-    op.id = newId("O");
+    op.id = op.id || newId("O");
     op.at = new Date().toISOString();
     D.outbox.push(op);
     M.addOp(op).catch(() => toast("Couldn't save that on this phone. Its storage may be full."));
@@ -217,14 +247,23 @@
     renderHeader();
     const full = !!opts.full || D.tick % 8 === 0;
     let r;
-    try { r = await M.withLock(() => M.syncAll({ full })); }
+    const hello = D.hello;
+    try { r = await M.withLock(() => M.syncAll({ full, hello })); }
     catch (e) { r = { ok: false, error: "storage", message: String((e && e.message) || e) }; }
     D.busy = false;
     try { await reloadFromDb(); } catch (e) { /* keep what's on screen */ }
     const again = D.again; D.again = null;
     if (!r || !r.ok) {
       const err = r ? r.error : "";
-      if (err === "bad_key") { S.keyBad = true; D.offline = false; render(true); return; }
+      if (err === "bad_key") {
+        // Twice in a row before pausing, so one odd answer from the sheet never asks for the code.
+        D.badKeys = (D.badKeys || 0) + 1;
+        if (D.badKeys < 2) { schedule(4000); return; }
+        S.keyBad = true; D.offline = false;
+        if (!D.loaded) { S.keyBad = false; D.badKeys = 0; S.phase = "setup"; render(); return; }   // nothing downloaded yet: the code changed, so ask for the new one
+        render(true); return;
+      }
+      if (err === "not_setup" && D.setup) M.set("setup", D.setup).catch(() => { /* next try */ });
       D.fails++;
       D.offline = !!(r && r.offline);
       if (err === "busy") { renderHeader(); schedule(3000); return; }
@@ -234,8 +273,14 @@
       schedule(navigator.onLine === false ? 60000 : Math.min(60000, 5000 * D.fails));
       return;
     }
-    D.fails = 0; D.offline = false; D.lastOk = Date.now();
-    (r.rejected || []).forEach(x => toast("Couldn't save one update: " + ((x && x.why) || "the sheet turned it down")));
+    D.fails = 0; D.badKeys = 0; D.offline = false; D.lastOk = Date.now();
+    if (hello && D.hello === hello) D.hello = null;
+    (r.rejected || []).forEach(x => {
+      const why = (x && x.why) || "the sheet turned it down";
+      if (x && P.testId && x.id === P.testId) { P.testId = ""; toast(why); return; }
+      toast("Couldn't save one update: " + why);
+    });
+    if (P.testId && (r.applied || []).includes(P.testId)) { P.testId = ""; toast("Test sent. It shows up on this phone in a few seconds."); }
     render(true);
     if (opts.user) toast(D.outbox.length ? "Still sending…" : "Everything's synced with your sheet.");
     if (again) { sync(again); return; }
@@ -253,26 +298,94 @@
     registerSW();
     wireLifecycle();
 
-    let setup = null, base = null, outbox = [], pin = null, lastOk = 0;
-    try { [setup, base, outbox, pin, lastOk] = await Promise.all([M.get("setup"), M.get("base"), M.get("outbox"), M.get("pin"), M.get("lastOk")]); }
-    catch (e) { S.storageError = true; }
-    D.setup = setup || null;
-    D.outbox = Array.isArray(outbox) ? outbox : [];
-    L.pin = pin || null;
-    D.lastOk = lastOk || 0;
+    // What's saved on this phone. The setup code also has a spare copy, so a phone whose storage hiccups
+    // (it happens on iPhones right after the app comes back) never asks for the code again.
+    const saved = await readSaved();
+    const spare = goodSetup(lsGet("setup", null));
+    const reloaded = reloadedForStorage();
+    if (!saved.ok && spare) {
+      if (!reloaded) { reloadForStorage(); return; }   // a fresh start of the page usually clears it up
+      S.phase = "stuck"; render(); waitForStorage(); return;
+    }
+    if (!saved.ok) S.storageError = true;
+    let setup = goodSetup(saved.setup), hello = null;
+    if (!setup && spare && saved.ok) {   // storage lost the setup but the spare copy has it: put it back
+      setup = spare;
+      hello = { why: "restored" };
+      try { await M.set("setup", setup); } catch (e) { /* the first sync puts it back */ }
+    } else if (setup && (saved.tries > 1 || reloaded)) hello = { why: "storage", tries: saved.tries, reload: reloaded };
+    D.setup = setup;
+    D.outbox = Array.isArray(saved.outbox) ? saved.outbox : [];
+    L.pin = goodPin(saved.pin) || goodPin(lsGet("pin", null));
+    if (L.pin && !goodPin(saved.pin) && saved.ok) M.set("pin", L.pin).catch(() => { /* next change */ });
+    D.lastOk = saved.lastOk || 0;
+    const base = saved.base;
     if (base && base.state) loadState(base.state, base.ver, base.at);
     // If this copy of the app now points at a different sync link, use it.
     if (D.setup && CFG.syncUrl && D.setup.url !== CFG.syncUrl) {
       D.setup = Object.assign({}, D.setup, { url: CFG.syncUrl });
       M.set("setup", D.setup).catch(() => { /* next time */ });
     }
-    if (!D.setup || !D.loaded) { S.phase = "setup"; render(); return; }
-    S.phase = "app";
+    if (D.setup) { lsSet("setup", spareOf(D.setup)); keepStorage(); }
+    if (L.pin) lsSet("pin", L.pin);
+    if (hello && D.setup) D.hello = Object.assign({ id: newId("H") }, hello, phoneInfo());
+    // Opened from the daily reminder: the Changes tab, with the main list under it for Back.
+    const go = new URLSearchParams(location.search).get("open");
+    if (go) { try { history.replaceState(history.state, "", location.pathname); } catch (e) { /* fine */ } }
+    if (!D.setup) { S.phase = "setup"; render(); return; }
+    S.phase = "app";   // with no copy of the equipment yet, it shows Loading and downloads it with the saved code
     derive();
     navStart();
     if (shouldLock()) openLock("unlock");
     render();
+    if (go === "changes") setTab("changes");
     sync({ full: true });
+  }
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const goodSetup = x => (x && typeof x === "object" && normKey(x.key).length === 12 && typeof x.url === "string" && /^https?:\/\//.test(x.url) ? x : null);
+  const goodPin = x => (x && typeof x === "object" && typeof x.salt === "string" && typeof x.hash === "string" && x.hash ? x : null);
+  const spareOf = st => ({ key: st.key, url: st.url, device: st.device || "", at: st.at || Date.now() });
+  const phoneInfo = () => ({ phone: isIOS() ? "iPhone" : isAndroid() ? "Android" : "computer", app: standalone() });
+  // A few quick tries, each on a fresh connection, before deciding this phone's storage isn't answering.
+  async function readSaved() {
+    const waits = [0, 400, 1200];
+    for (let i = 0; i < waits.length; i++) {
+      if (i) { M.reset(); await sleep(waits[i]); }
+      try {
+        const all = Promise.all(["setup", "base", "outbox", "pin", "lastOk"].map(k => M.get(k)));
+        all.catch(() => { /* handled below */ });
+        const got = await Promise.race([all, sleep(9000).then(() => null)]);
+        if (!got) continue;   // stuck: start over on a fresh connection
+        const [setup, base, outbox, pin, lastOk] = got;
+        return { ok: true, tries: i + 1, setup, base, outbox, pin, lastOk };
+      } catch (e) { /* try again */ }
+    }
+    return { ok: false, tries: waits.length };
+  }
+  function reloadedForStorage() {
+    let at = 0;
+    try { at = Number(sessionStorage.getItem("ml.storageReload")) || 0; sessionStorage.removeItem("ml.storageReload"); } catch (e) { /* none */ }
+    return Date.now() - at < 120000;
+  }
+  function reloadForStorage() {
+    try { sessionStorage.setItem("ml.storageReload", String(Date.now())); } catch (e) { /* reload anyway */ }
+    location.reload();
+  }
+  // Still not answering after a fresh start: a screen that keeps trying by itself (the code is safe, nothing to type).
+  function waitForStorage() {
+    setTimeout(async () => {
+      if (S.phase !== "stuck") return;
+      M.reset();
+      try { await M.get("setup"); location.reload(); } catch (e) { waitForStorage(); }
+    }, 3000);
+  }
+  // Asks the phone to keep the app's storage even when it runs low on space.
+  function keepStorage() {
+    try {
+      const sm = navigator.storage;
+      if (sm && sm.persist) (sm.persisted ? sm.persisted() : Promise.resolve(false)).then(p => p || sm.persist()).catch(() => { /* best effort */ });
+    } catch (e) { /* best effort */ }
   }
 
   function wireLifecycle() {
@@ -312,6 +425,7 @@
     });
     navigator.serviceWorker.addEventListener("message", e => {
       if (e.data && e.data.t === "synced" && S.phase === "app") reloadFromDb().then(() => render(true)).catch(() => { /* fine */ });
+      if (e.data && e.data.t === "open" && S.phase === "app" && TABS.includes(e.data.tab)) { S.quick = null; setTab(e.data.tab); }
     });
   }
 
@@ -339,7 +453,8 @@
     if (btn) btn.textContent = "Downloading your machines…";
     const device = newId("D");
     let res;
-    try { res = await M.post(CFG.syncUrl, { key: code, device, app: VERSION, full: true, ops: [] }, 60000); }
+    const hello = Object.assign({ id: newId("H"), why: "setup", storage: S.storageError ? "error" : "" }, phoneInfo());
+    try { res = await M.post(CFG.syncUrl, { key: code, device, app: VERSION, full: true, ops: [], hello }, 60000); }
     catch (e) {
       setFormBusy(form, false);
       if (btn) btn.textContent = "Connect";
@@ -362,7 +477,9 @@
       if (btn) btn.textContent = "Connect";
       return showWarn(form, "setupWarn", "This phone wouldn't let the app save anything. In Safari, private browsing blocks it.");
     }
-    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* best effort */ }
+    lsSet("setup", spareOf(setup));
+    keepStorage();
+    S.storageError = false;
     D.setup = setup;
     D.lastOk = Date.now();
     loadState(res.state, res.ver, 0);
@@ -484,6 +601,7 @@
         const pin = { salt, hash: await pinHash(salt, entry), after: L.pin && L.pin.after !== undefined ? L.pin.after : 15 * 60000 };
         try { await M.set("pin", pin); } catch (e) { L.msg = "Couldn't save the PIN on this phone."; L.bad = true; L.mode = "new"; L.entry = ""; return renderLock(); }
         L.pin = pin;
+        lsSet("pin", pin);
         closeLock();
         toast("PIN saved. The app asks for it after you've been away 15 minutes. You can change that under the person button.");
       }
@@ -505,7 +623,7 @@
     $("#tabs").hidden = !ready;
     $("#meBtn").hidden = !ready;
     renderHeader();
-    if (!ready) { if (S.phase === "setup") renderSignin(); return; }
+    if (!ready) { if (S.phase === "setup") renderSignin(); else if (S.phase === "stuck") renderStuck(); return; }
     if (!S.me.isOwner && S.tab === "approved") S.tab = "fleet";
     $("#tab-approved").hidden = !S.me.isOwner;
     ["fleet", "due", "changes", "approved"].forEach(t => {
@@ -529,7 +647,7 @@
     const waiting = D.outbox.length;
     const off = isOffline();
     const plural = k => k + " update" + (k === 1 ? "" : "s");
-    if (S.phase === "boot") text = "Loading…";
+    if (S.phase === "boot" || S.phase === "stuck") text = "Loading…";
     else if (S.phase === "setup") text = "Set up this phone";
     else if (!D.loaded) text = "Loading equipment…";
     else if (S.keyBad) { text = "Sync paused · setup code changed"; warn = true; }
@@ -566,7 +684,7 @@
   }
 
   function stateBlock(kind) {
-    if (kind === "loading") return `<div class="card empty-state"><h3>Loading equipment</h3><p>Pulling up every machine, truck, trailer and small engine.</p></div>`;
+    if (kind === "loading") return `<div class="card empty-state"><h3>Loading equipment</h3><p>${isOffline() ? "No signal right now. It all downloads by itself once there's service." : "Pulling up every machine, truck, trailer and small engine."}</p></div>`;
     return `<div class="card empty-state"><h3>No equipment yet</h3><p>Your sheet doesn't have any units in it. Ask Claude to load the equipment list.</p></div>`;
   }
 
@@ -575,6 +693,16 @@
     const iosSteps = `<div><div class="os">iPhone</div><ol><li>Open this page in <b>Safari</b>.</li><li>Tap the Share button ${SHARE_SVG}, then <b>Add to Home Screen</b>.</li><li>Open <b>Machines</b> from your home screen and set it up there.</li></ol></div>`;
     const andSteps = `<div><div class="os">Android</div><ol><li>In <b>Chrome</b>, tap the ⋮ menu, then <b>Add to Home screen</b> or <b>Install app</b>.</li><li>Open <b>Machines</b> from your home screen.</li></ol></div>`;
     return `<div class="install-steps">${ios ? iosSteps : android ? andSteps : iosSteps + andSteps}</div>`;
+  }
+
+  function renderStuck() {
+    $("#signin").innerHTML = `<div class="card card-pad signin-card setup-card">
+      <div class="brand-mark lg" aria-hidden="true">ML</div>
+      <h2>Opening your equipment</h2>
+      <p>This phone's storage isn't answering right now. Your setup code is still saved, so there's nothing to type.</p>
+      <p class="muted">The app keeps trying by itself. If this stays up, close the app all the way and open it again.</p>
+      <div class="row-actions"><button class="btn primary wide" type="button" data-action="reload-app">Try again</button></div>
+    </div>`;
   }
 
   function renderSignin() {
@@ -639,40 +767,50 @@
     $("#summary").innerHTML = tiles.map(([k, l]) =>
       `<button class="sum ${k}" data-st="${k}" aria-pressed="${S.st === k}"><b class="num">${count(k)}</b><span>${l}</span></button>`).join("");
 
-    // Tabs: All, then each kind of equipment. No tabs for people or small engines.
+    // Tabs: All, then each kind of equipment in the owner's order. No tabs for people or small engines.
     const chips = $("#whoChips");
-    const tabs = C.GROUP_ORDER.filter(k => !C.NO_TAB.has(k) && all.some(x => x.g === k));
+    const order = groupOrder();
+    const tabs = order.filter(k => !C.NO_TAB.has(k) && all.some(x => x.g === k));
     if (S.cat !== "all" && !tabs.includes(S.cat)) S.cat = "all";
-    chips.classList.toggle("wrap", finePointer());   // with a mouse, show every tab instead of a row to swipe
-    chips.innerHTML = [["all", "All"]].concat(tabs.map(k => [k, C.groupName(k)])).map(([k, l]) =>
-      `<button class="chip" data-cat="${esc(k)}" aria-pressed="${S.cat === k}">${esc(l)}</button>`).join("");
-    if (!S.chipsPlaced && chips.offsetParent) { S.chipsPlaced = true; showPressedChip(chips); }
+    if (!TD.on) {   // never redraw the row under a finger that's moving a tab
+      chips.classList.toggle("wrap", finePointer());   // with a mouse, show every tab instead of a row to swipe
+      chips.classList.toggle("movable", canArrange());
+      chips.innerHTML = [["all", "All"]].concat(tabs.map(k => [k, C.groupName(k)])).map(([k, l]) =>
+        `<button class="chip" data-cat="${esc(k)}" aria-pressed="${S.cat === k}">${esc(l)}</button>`).join("");
+      if (!S.chipsPlaced && chips.offsetParent) { S.chipsPlaced = true; showPressedChip(chips); }
+    }
 
     const terms = S.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const rows = all.filter(({ u, s, g }) =>
       (S.cat === "all" || g === S.cat) && matchSt(u, s.st) &&
       (!terms.length || terms.every(term => haystack(u).includes(term))));
     if (!rows.length) {
-      body.innerHTML = noticeCards() + `<div class="card empty-state"><h3>No matches</h3><p>Nothing fits that search and filter. Clear the search or pick All.</p><p style="margin-top:12px"><button class="btn" data-action="clear-filters">Clear search and filters</button></p></div>`;
+      body.innerHTML = noticeCards() + `<div class="card empty-state"><h3>No matches</h3><p>Nothing fits that search and filter. Clear the search or pick All.</p><p style="margin-top:12px"><button class="btn" data-action="clear-filters">Clear search and filters</button></p></div>` + addRow();
       return;
     }
-    const section = (title, list, opts) => `<section class="group"><div class="group-h"><h2>${esc(title)}</h2><span>${list.length}</span></div>${list.map(r => unitRow(r.u, r.s, opts)).join("")}</section>`;
+    const section = (title, list, opts) => `<section class="group"><div class="group-h"><h2>${esc(title)}</h2><span>${list.length}</span></div>${list.map(r => unitRow(r.u, r.s, opts) + quickPanel(r.u)).join("")}</section>`;
     let html = noticeCards() + tipCard();
     if (S.cat !== "all") {
-      html += section(C.groupName(S.cat), rows);   // a tab shows every unit of that kind, whoever it belongs to
+      html += section(C.groupName(S.cat), rows) + addRow();   // a tab shows every unit of that kind, whoever it belongs to
     } else {
       const gear = rows.filter(r => !r.p);
       const kind = k => gear.filter(r => r.g === k);
-      C.GROUP_ORDER.filter(k => !C.NO_TAB.has(k)).forEach(k => { const g = kind(k); if (g.length) html += section(C.groupName(k), g); });
+      order.filter(k => !C.NO_TAB.has(k)).forEach(k => { const g = kind(k); if (g.length) html += section(C.groupName(k), g); });
       // Each person's own gear in one section: their truck first, then what rides in it.
-      const at = k => { const i = C.GROUP_ORDER.indexOf(k); return i < 0 ? 99 : i; };
+      const at = k => { const i = order.indexOf(k); return i < 0 ? 99 : i; };
       [...new Set(rows.filter(r => r.p).map(r => r.p))].sort((a, b) => personRank(a) - personRank(b) || a.localeCompare(b))
         .forEach(p => { html += section(p, rows.filter(r => r.p === p).sort((a, b) => at(a.g) - at(b.g)), { mine: true }); });
-      C.GROUP_ORDER.filter(k => C.NO_TAB.has(k)).forEach(k => { const g = kind(k); if (g.length) html += section(C.groupName(k), g); });
+      order.filter(k => C.NO_TAB.has(k)).forEach(k => { const g = kind(k); if (g.length) html += section(C.groupName(k), g); });
       const other = gear.filter(r => !C.GROUP_ORDER.includes(r.g));
       if (other.length) html += section("Other", other);
     }
     body.innerHTML = html;
+  }
+
+  // At the bottom of one kind's tab (never under All): a small way to add another one of them.
+  function addRow() {
+    if (S.cat === "all" || !S.me.isOwner || S.readOnly || C.NO_TAB.has(S.cat)) return "";
+    return `<div class="add-row"><button type="button" class="add-unit" data-action="add-unit">+ Add a ${esc(C.oneOf(S.cat))}</button></div>`;
   }
 
   // A unit that is one person's own gear (their truck and what rides in it) sits in that person's section.
@@ -711,9 +849,9 @@
   const fleetCats = () => [...document.querySelectorAll("#whoChips [data-cat]")].map(b => b.dataset.cat);
   function swipeStart(e) {
     SW.on = false;
-    if (S.phase !== "app" || S.tab !== "fleet" || L.open || !e.touches || e.touches.length !== 1) return;
-    if (S.openId && window.innerWidth < 980) return;
-    if (e.target.closest && e.target.closest("#whoChips, input, textarea, select, .editor")) return;
+    if (S.phase !== "app" || S.tab !== "fleet" || L.open || !e.touches || e.touches.length !== 1 || S.quick || TD.on) return;
+    if ((S.openId || S.adding) && window.innerWidth < 980) return;
+    if (e.target.closest && e.target.closest("#whoChips, input, textarea, select, .editor, .qa")) return;
     const p = e.touches[0];
     if (p.clientX < 16 || p.clientX > window.innerWidth - 16) return;   // the phone's own edge swipe (Back)
     Object.assign(SW, { on: true, x: p.clientX, y: p.clientY, t: Date.now(), dx: 0, lock: "", pts: [[Date.now(), p.clientX]] });
@@ -803,6 +941,270 @@
     document.addEventListener("click", e => { if (Date.now() < SW.until) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
   })();
 
+  // ---------------------------------------------------------------- press and hold
+  // Holding a finger (or the mouse button) still on something for a moment: a unit in the list opens its quick
+  // buttons right there, and an equipment tab lifts so it can be slid to a new place in the row.
+  const HOLD_MS = 450;
+  const hold = { timer: null, el: null, x: 0, y: 0, until: 0, touch: false, fired: false };
+  function holdStart(el, x, y, touch, fire) {
+    holdCancel();
+    Object.assign(hold, { el, x, y, touch, fired: false });
+    // Until the finger lifts, a click is the end of this press, not a tap of its own.
+    hold.timer = setTimeout(() => { hold.timer = null; hold.fired = true; hold.until = Date.now() + 10000; fire(); }, HOLD_MS);
+  }
+  function holdMove(x, y) { if (hold.timer && Math.hypot(x - hold.x, y - hold.y) > 10) holdCancel(); }
+  function holdCancel() { clearTimeout(hold.timer); hold.timer = null; }
+  // The lift: any click it makes comes with it, right away, so the next real tap goes through.
+  function holdLift() {
+    holdCancel();
+    if (hold.fired) { hold.fired = false; hold.until = Date.now() + 120; }
+  }
+  const buzz = () => { try { if (navigator.vibrate) navigator.vibrate(12); } catch (e) { /* no buzz */ } };
+
+  // ---------------------------------------------------------------- quick buttons on a unit
+  // Press and hold a unit in the Fleet list: Location, Needs fuel and Hours (Miles on trucks) open right where it
+  // is, so a quick update doesn't mean going into the unit. Back or ✕ closes them.
+  function quickPanel(u) {
+    if (!S.quick || S.quick.id !== u.id) return "";
+    const q = S.quick, truck = u.g === "TRK", fuel = needsFuel(u);
+    const btns = [];
+    if (C.applies(u, C.FIELDS.loc.rule)) btns.push(`<button type="button" class="qa-btn${q.mode === "loc" ? " on" : ""}" data-action="qa-loc" aria-pressed="${q.mode === "loc"}">${PIN_SVG}<span>Location</span></button>`);
+    if (hasFuel(u)) btns.push(`<button type="button" class="qa-btn fuel${fuel ? " needs" : ""}" data-action="qa-fuel">${fuel ? NOFUEL_SVG : FUEL_SVG}<span>${fuel ? "Fueled" : "Needs fuel"}</span></button>`);
+    if (C.usesMeter(u)) btns.push(`<button type="button" class="qa-btn${q.mode === "hours" ? " on" : ""}" data-action="qa-hours" aria-pressed="${q.mode === "hours"}">${CLOCK_SVG}<span>${truck ? "Miles" : "Hours"}</span></button>`);
+    let html = `<div class="qa" id="qa" role="group" aria-label="Quick updates for ${esc(nameOf(u))}">
+      <div class="qa-head"><div class="qa-btns" style="--n:${btns.length}">${btns.join("")}</div><button type="button" class="qa-x" data-action="qa-close" aria-label="Close the quick buttons">✕</button></div>`;
+    if (q.mode === "loc") {
+      const loc = ((u.v || {}).loc || "").trim();
+      html += `<form class="editor qa-ed" data-form="qa-loc">
+        <label for="qa-loc-in">Where is it now?<input id="qa-loc-in" name="val" type="text" autocomplete="off" value="${esc(loc)}" placeholder="Job name, address or Shop"></label>
+        <div class="chips wrap">${locationPicks(u).map(p => `<button type="button" class="chip" data-action="qa-loc-pick" data-val="${esc(p)}">${esc(p)}</button>`).join("")}</div>
+        <p class="warn" id="qaWarn" hidden></p>
+        <div class="row-actions"><button class="btn primary" type="submit">Save location</button><button class="btn" type="button" data-action="qa-close">Cancel</button></div>
+      </form>`;
+    } else if (q.mode === "hours") {
+      html += `<form class="editor qa-ed" data-form="qa-hours">${hoursInputs(u, "qa")}
+        <p class="warn" id="qaWarn" hidden></p>
+        <div class="row-actions"><button class="btn primary" type="submit">Save ${truck ? "miles" : "hours"}</button><button class="btn" type="button" data-action="qa-close">Cancel</button></div>
+      </form>`;
+    }
+    return html + `</div>`;
+  }
+  function openQuick(id) {
+    const u = S.units.get(id);
+    if (!u || S.readOnly) return;
+    if (!C.applies(u, C.FIELDS.loc.rule) && !hasFuel(u) && !C.usesMeter(u)) { toast(`${nameOf(u)} has nothing to update quickly. Tap it to open it.`); return; }
+    buzz();
+    const had = !!S.quick;
+    S.quick = { id, mode: null, draft: null };
+    if (!had) navPush({ qa: id }); else try { history.replaceState(screenNow({ qa: id }), ""); } catch (e) { /* fine */ }
+    renderFleet();
+    const p = $("#qa");
+    if (p && p.scrollIntoView) { const r = p.getBoundingClientRect(); if (r.bottom > window.innerHeight - 10) p.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" }); }
+    rootWatch();
+  }
+  // Closing them: Back takes their step off (onBack redraws); without one, just redraw.
+  function closeQuick() {
+    if (!S.quick) return;
+    const st = history.state;
+    if (NAV.on && st && st.ml && st.qa && goBackOne()) return;
+    S.quick = null;
+    renderFleet();
+    rootWatch();
+  }
+  function quickMode(mode) {
+    if (!S.quick) return;
+    S.quick.mode = S.quick.mode === mode ? null : mode;
+    S.quick.draft = null;
+    renderFleet();
+    if (S.quick.mode === "loc") { const i = $("#qa-loc-in"); if (i) i.focus(); }
+    const p = $("#qa"); if (p && p.scrollIntoView) p.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
+  }
+  function quickSaved(msg) {
+    const st = history.state;
+    S.quick = null;
+    if (NAV.on && st && st.ml && st.qa) { NAV.ignore++; history.back(); }
+    render();
+    rootWatch();
+    toast(msg);
+  }
+  function quickFuel() {
+    const u = S.quick && S.units.get(S.quick.id); if (!u || !canWrite()) return;
+    const on = !needsFuel(u);
+    queueOp({ t: "fuel", unit: u.id, needs: on });
+    quickSaved((on ? `Flagged ${nameOf(u)} as needing fuel.` : `Marked ${nameOf(u)} as fueled.`) + crewNote() + offlineNote());
+  }
+  function quickLoc(form) {
+    const u = S.quick && S.units.get(S.quick.id); if (!u) return;
+    const val = form.elements.val.value.trim().replace(/\s+/g, " ");
+    if (!val) return showWarn(form, "qaWarn", "Type where it is, or tap Shop.");
+    const old = (u.v || {}).loc;
+    if (same(old, val)) { closeQuick(); return; }
+    const f = C.FIELDS.loc;
+    if (!queueChange(u, { v: { loc: val } }, [{ key: "loc", label: f.label, section: f.section, from: old, to: val, type: f.type }])) return;
+    quickSaved((/\bshop\b/i.test(val) ? `${nameOf(u)} is at the shop.` : `Moved ${nameOf(u)} to ${val}.`) + crewNote() + offlineNote());
+  }
+  function quickHours(form) {
+    const u = S.quick && S.units.get(S.quick.id); if (!u) return;
+    const r = hoursChange(u, form, "qaWarn");
+    if (!r) return;
+    if (!r.changes.length) { closeQuick(); return; }
+    if (!queueChange(u, r.patch, r.changes)) return;
+    quickSaved(`Saved ${C.fmtNum(r.n)} ${C.unitWord(u)} for ${nameOf(u)}.` + crewNote() + offlineNote());
+  }
+
+  // Unit rows: a long press opens the quick buttons; the click after it doesn't open the unit.
+  (function wireUnitHold() {
+    const body = $("#fleetBody");
+    if (!body) return;
+    const row = e => (e.target.closest ? e.target.closest(".unit-row[data-open]") : null);
+    body.addEventListener("touchstart", e => {
+      const r = row(e);
+      if (!r || !e.touches || e.touches.length !== 1 || S.readOnly) return;
+      holdStart(r, e.touches[0].clientX, e.touches[0].clientY, true, () => openQuick(r.dataset.open));
+    }, { passive: true });
+    body.addEventListener("touchmove", e => { if (e.touches && e.touches[0]) holdMove(e.touches[0].clientX, e.touches[0].clientY); }, { passive: true });
+    body.addEventListener("mousedown", e => {
+      const r = row(e);
+      if (!r || e.button !== 0 || S.readOnly || Date.now() - lastTouch < 800) return;
+      holdStart(r, e.clientX, e.clientY, false, () => openQuick(r.dataset.open));
+    });
+    body.addEventListener("mousemove", e => holdMove(e.clientX, e.clientY));
+    body.addEventListener("mouseleave", holdCancel);
+    body.addEventListener("contextmenu", e => { if (row(e)) e.preventDefault(); });   // a long press on a phone is ours, not the browser's menu
+  })();
+  let lastTouch = 0;
+  document.addEventListener("touchstart", () => { lastTouch = Date.now(); }, { capture: true, passive: true });
+  ["touchend", "touchcancel", "mouseup"].forEach(t => document.addEventListener(t, holdLift, { capture: true, passive: true }));
+  document.addEventListener("click", e => { if (Date.now() < hold.until) { e.preventDefault(); e.stopImmediatePropagation(); hold.until = 0; } }, true);
+
+  // ---------------------------------------------------------------- rearranging the equipment tabs
+  // Press and hold a tab (not All) until it lifts, slide it along the row, and let go where it should go. The
+  // others make room as it passes. All always stays first. The order is saved to your sheet, so every phone
+  // (the crew's too) shows the tabs in the same order. Only the owner can move them.
+  const canArrange = () => S.me.isOwner && !S.readOnly && S.phase === "app";
+  const TD = { on: false, el: null, row: null, items: [], from: 0, to: 0, x0: 0, s0: 0, fx: 0, w: 0, gap: 6, raf: 0, edge: 0 };
+  function dragBegin(el) {
+    const row = $("#whoChips");
+    if (!row || !el || !el.isConnected || el.dataset.cat === "all") return;
+    buzz();
+    const rr = row.getBoundingClientRect();
+    const btns = [...row.querySelectorAll(".chip[data-cat]")];
+    const items = btns.map(b => { const r = b.getBoundingClientRect(); return { el: b, key: b.dataset.cat, left: r.left - rr.left + row.scrollLeft, w: r.width }; });
+    const from = items.findIndex(x => x.el === el);
+    if (from < 1) return;
+    const gap = items.length > 1 ? Math.max(0, items[1].left - (items[0].left + items[0].w)) : 6;
+    Object.assign(TD, { on: true, el, row, items, from, to: from, x0: hold.x, s0: row.scrollLeft, fx: hold.x, w: items[from].w, gap, edge: 0 });
+    row.classList.add("arranging");
+    el.classList.add("lifted");
+    el.setAttribute("aria-grabbed", "true");
+    dragPaint();
+  }
+  function dragMove(x) {
+    if (!TD.on) return;
+    TD.fx = x;
+    const rr = TD.row.getBoundingClientRect();
+    TD.edge = x < rr.left + 36 ? -1 : x > rr.right - 36 ? 1 : 0;   // near an end: scroll the row along
+    if (TD.edge && !TD.raf) TD.raf = requestAnimationFrame(dragScroll);
+    dragPaint();
+  }
+  function dragScroll() {
+    TD.raf = 0;
+    if (!TD.on || !TD.edge) return;
+    const before = TD.row.scrollLeft;
+    TD.row.scrollLeft += TD.edge * 9;
+    if (TD.row.scrollLeft !== before) dragPaint();
+    TD.raf = requestAnimationFrame(dragScroll);
+  }
+  // Where the lifted tab is now, and which way the others slide to make room.
+  function dragPaint() {
+    const { items, from } = TD;
+    const dx = (TD.fx - TD.x0) + (TD.row.scrollLeft - TD.s0);
+    const minLeft = items[1].left - items[from].left;   // never in front of All
+    const maxLeft = (items[items.length - 1].left + items[items.length - 1].w) - (items[from].left + items[from].w);
+    const off = Math.max(minLeft, Math.min(maxLeft, dx));
+    // Its leading edge passing the middle of a neighbor swaps them (tabs aren't all the same width).
+    const lead = items[from].left + off, tail = lead + TD.w;
+    let to = from;
+    for (let i = 1; i < items.length; i++) {
+      if (i === from) continue;
+      const c = items[i].left + items[i].w / 2;
+      if (i < from && lead < c) { to = Math.min(to, i); }
+      if (i > from && tail > c) { to = Math.max(to, i); }
+    }
+    TD.to = to;
+    const shift = TD.w + TD.gap;
+    items.forEach((it, i) => {
+      if (i === from) { it.el.style.transform = `translateX(${Math.round(off)}px) scale(1.06)`; return; }
+      const s = from < to && i > from && i <= to ? -shift : from > to && i >= to && i < from ? shift : 0;
+      it.el.style.transform = s ? `translateX(${s}px)` : "";
+    });
+  }
+  function dragEnd(cancel) {
+    if (!TD.on) return;
+    cancelAnimationFrame(TD.raf); TD.raf = 0;
+    const { items, from, to, row } = TD;
+    TD.on = false;
+    row.classList.remove("arranging");
+    items.forEach(it => { it.el.style.transform = ""; it.el.classList.remove("lifted"); it.el.removeAttribute("aria-grabbed"); });
+    hold.until = Date.now() + 120;   // the lift at the end isn't a tap on the tab
+    if (cancel || to === from) { renderFleet(); return; }
+    const keys = items.map(it => it.key).filter(k => k !== "all");
+    const moved = keys.splice(from - 1, 1)[0];
+    keys.splice(to - 1, 0, moved);
+    // Tabs that aren't showing (no units of that kind yet) keep their places after the ones that are.
+    const full = keys.concat(groupOrder().filter(k => !keys.includes(k)));
+    queueOp({ t: "taborder", order: full });
+    renderFleet();
+    toast(`Moved ${C.groupName(moved)}. Every phone shows the tabs in this order.` + offlineNote());
+  }
+  (function wireTabDrag() {
+    const row = $("#whoChips");
+    if (!row) return;
+    const chip = e => (e.target.closest ? e.target.closest(".chip[data-cat]") : null);
+    row.addEventListener("touchstart", e => {
+      const c = chip(e);
+      if (!c || c.dataset.cat === "all" || !canArrange() || !e.touches || e.touches.length !== 1) return;
+      holdStart(c, e.touches[0].clientX, e.touches[0].clientY, true, () => dragBegin(c));
+    }, { passive: true });
+    // Once a tab is lifted, the finger moves it instead of scrolling the row.
+    row.addEventListener("touchmove", e => {
+      const p = e.touches && e.touches[0];
+      if (!p) return;
+      if (TD.on) { if (e.cancelable) e.preventDefault(); dragMove(p.clientX); return; }
+      holdMove(p.clientX, p.clientY);
+    }, { passive: false });
+    row.addEventListener("touchend", () => { holdCancel(); dragEnd(false); }, { passive: true });
+    row.addEventListener("touchcancel", () => { holdCancel(); dragEnd(true); }, { passive: true });
+    row.addEventListener("mousedown", e => {
+      const c = chip(e);
+      if (!c || c.dataset.cat === "all" || e.button !== 0 || !canArrange() || Date.now() - lastTouch < 800) return;
+      holdStart(c, e.clientX, e.clientY, false, () => dragBegin(c));
+    });
+    window.addEventListener("mousemove", e => { if (TD.on) { e.preventDefault(); dragMove(e.clientX); } else holdMove(e.clientX, e.clientY); });
+    window.addEventListener("mouseup", () => { holdCancel(); dragEnd(false); });
+    window.addEventListener("keydown", e => { if (TD.on && e.key === "Escape") dragEnd(true); });
+    row.addEventListener("contextmenu", e => { if (chip(e)) e.preventDefault(); });
+  })();
+
+  // ---------------------------------------------------------------- the Overdue / Due soon / … filters
+  // Tapping a box shows just those units; tapping it again, or the phone's Back button, goes back to the full list.
+  function setSt(k) {
+    S.quick = null;
+    if (S.st === k || k === "all") {
+      const st = history.state;
+      if (NAV.on && st && st.ml && !st.base && st.st && st.st !== "all" && goBackOne()) return;
+      S.st = "all";
+    } else if (S.st === "all") {
+      S.st = k;
+      navPush();
+    } else {
+      S.st = k;
+      try { if (NAV.on && history.state && history.state.ml) history.replaceState(Object.assign({}, history.state, { st: k }), ""); } catch (e) { /* fine */ }
+    }
+    renderFleet();
+    rootWatch();
+  }
+
   // Notes at the top of the list: a new version of the app, or sync paused.
   function noticeCards() {
     let html = "";
@@ -837,7 +1239,7 @@
       (probs ? `<span class="tag prob">${probs === 1 ? "Problem" : probs + " problems"}</span>` : "") + (shop ? `<span class="tag shop">At shop</span>` : "");
     const cur = C.num(v.cur);
     const hrs = C.usesMeter(u) && cur !== null ? C.fmtNum(cur) + " " + C.unitWord(u) : "";
-    const cls = "unit-row" + (probs ? " has-problem" : shop ? " at-shop" : "");
+    const cls = "unit-row" + (probs ? " has-problem" : shop ? " at-shop" : "") + (S.quick && S.quick.id === u.id ? " qa-on" : "");
     return `<button class="${cls}" data-open="${esc(u.id)}"${S.openId === u.id ? ' aria-current="true"' : ""}>
       <span class="plate">${esc(u.id)}</span>
       <span class="u-main"><span class="u-name">${esc(nameOf(u))}${fuel ? `<span class="fuel-flag" title="Needs fuel">${NOFUEL_SVG}<span class="sr">Needs fuel</span></span>` : ""}</span><span class="u-sub">${tags}${esc(bits.join(" · ") || C.catName(u))}</span></span>
@@ -899,6 +1301,10 @@
   }
   function changeDiff(c, from, to) {
     const key = String(c.key || "");
+    if (key === "newunit") {
+      const u = S.units.get(c.unit);
+      return `<span class="to">Added to the app${u ? " as a new " + esc(C.oneOf(C.groupOf(u))) : ""}: ${esc(c.to)}</span>`;
+    }
     if (key === "fuel") return `<span class="to">${c.to === "Yes" ? "Needs fuel" : "Fueled"}</span>`;
     if (key.startsWith("prob:")) return `<span class="to">Reported: ${esc(c.to)}</span>`;
     if (key.startsWith("fix:")) return `<span class="to">Marked fixed: ${esc(c.from)}</span>`;
@@ -997,7 +1403,7 @@
     groups.forEach(g => { if (!byUnit.has(g.unit)) byUnit.set(g.unit, []); byUnit.get(g.unit).push(g); });
     const rank = id => (order.has(id) ? order.get(id) : 99999);
     const ids = [...byUnit.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
-    const fr = g => (FIELD_ORDER.has(g.key) ? FIELD_ORDER.get(g.key) : 9999);
+    const fr = g => (g.key === "newunit" ? -1 : FIELD_ORDER.has(g.key) ? FIELD_ORDER.get(g.key) : 9999);
     let html = `<div class="card card-pad intro"><p><b>${plural(n, "approved change")}</b> to ${plural(ids.length, "unit")}, ready for the master sheet. Nothing there changes until you tap <b>Send</b> at the bottom.</p></div>`;
     ids.forEach(id => {
       const u = S.units.get(id), list = byUnit.get(id).sort((a, b) => fr(a) - fr(b));
@@ -1040,6 +1446,7 @@
   // ---------------------------------------------------------------- you: sync, app lock, backup
   function renderMe() {
     const el = $("#view-me");
+    if (S.me.isOwner && !P.checked && !P.checking) { P.checking = true; checkPush(); }
     const waiting = D.outbox.length;
     const off = isOffline();
     const lockAfter = L.pin ? L.pin.after : null;
@@ -1068,6 +1475,7 @@
       <div class="row-actions"><button class="btn primary" type="button" data-action="sync-now"${S.keyBad ? " disabled" : ""}>Sync now</button>${D.sheetUrl ? `<a class="btn" href="${esc(D.sheetUrl)}" target="_blank" rel="noopener">Open my sheet</a>` : ""}</div>
       ${standalone() ? "" : `<details class="howto"><summary>Put the app on your home screen</summary>${installSteps()}${S.installEvt ? `<div class="row-actions" style="margin-top:8px"><button class="btn" type="button" data-action="install">Add to home screen</button></div>` : ""}</details>`}
     </section>
+    ${reminderCard()}
     <section class="card card-pad me-card">
       <div class="eyebrow">App lock</div>
       ${L.pin ? `<label class="field" for="lockAfter">Ask for my PIN<select id="lockAfter">${LOCK_CHOICES.map(([ms, label]) => `<option value="${ms}"${ms === lockAfter ? " selected" : ""}>${label}</option>`).join("")}</select></label>
@@ -1082,6 +1490,81 @@
       <p class="ver-line">Machine List ${esc(VERSION)} · <button class="link" type="button" data-action="check-update">Check for an app update</button></p>
     </section>`;
     el.innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------- the daily reminder
+  // A notification on this phone once a day (around 6:30 PM) saying what's waiting. The sheet sends it as a Web
+  // Push; the phone has to allow notifications for the app once. The owner's app only.
+  const P = { checked: false, on: false, busy: false, denied: false, err: "", testId: "" };
+  const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const remindTime = () => String((D.config && D.config.reminderTime) || "6:30 PM");
+  function b64uBytes(s) {
+    const raw = atob((s + "===".slice((s.length + 3) % 4)).replace(/-/g, "+").replace(/_/g, "/"));
+    return Uint8Array.from(raw, ch => ch.charCodeAt(0));
+  }
+  const sameBytes = (a, b) => !!a && !!b && a.length === b.length && a.every((x, i) => x === b[i]);
+  function swReady(ms) {
+    return Promise.race([navigator.serviceWorker.ready, new Promise((_, no) => setTimeout(() => no(new Error("The app's helper isn't running yet. Reload and try again.")), ms || 5000))]);
+  }
+  async function checkPush() {
+    if (!S.me.isOwner || !pushSupported()) { P.checked = true; return; }
+    try { const reg = await swReady(4000); const sub = await reg.pushManager.getSubscription(); P.on = !!sub && Notification.permission === "granted"; }
+    catch (e) { /* shown as off */ }
+    P.denied = Notification.permission === "denied";
+    P.checked = true;
+    if (S.tab === "me") renderMe();
+  }
+  function reminderCard() {
+    if (!S.me.isOwner) return "";
+    const key = D.config && D.config.pushKey, busy = P.busy ? " disabled" : "";
+    const what = "changes waiting for your OK, open problems and machines that need fuel";
+    let body;
+    if (!pushSupported()) body = isIOS() && !standalone() ? `<p>On iPhone, reminders work once the app is on your home screen. Open it from there and turn this on.</p>` : `<p>This browser can't show notifications from the app.</p>`;
+    else if (!key) body = `<p>The reminder isn't set up on your sheet yet.</p>`;
+    else if (P.denied) body = `<p>Notifications are blocked for this app. ${isIOS() ? "On iPhone, open Settings, tap Notifications, find the app, and turn on Allow Notifications." : "On Android, press and hold the app's icon, tap App info, then Notifications, and turn them on."} Then come back here.</p>`;
+    else if (!P.checked) body = `<p class="muted">Checking this phone…</p>`;
+    else if (P.on) body = `<p><b>On.</b> Around ${esc(remindTime())} every day, this phone gets a notification with what's waiting: ${what}.</p>
+      <div class="row-actions"><button class="btn" type="button" data-action="remind-test"${busy}>Send a test now</button><button class="btn quiet" type="button" data-action="remind-off"${busy}>Turn off</button></div>`;
+    else body = `<p>A notification on this phone around ${esc(remindTime())} every day with what's waiting: ${what}.</p>
+      <div class="row-actions"><button class="btn primary" type="button" data-action="remind-on"${busy}>Turn on the daily reminder</button></div>`;
+    return `<section class="card card-pad me-card"><div class="eyebrow">Daily reminder</div>${body}${P.err ? `<p class="warn-text">${esc(P.err)}</p>` : ""}</section>`;
+  }
+  async function reminderOn() {
+    const key = D.config && D.config.pushKey;
+    if (!key || !pushSupported() || P.busy || !canWrite()) return;
+    P.busy = true; P.err = ""; renderMe();
+    try {
+      let perm = Notification.permission;
+      if (perm !== "granted") perm = await Notification.requestPermission();
+      if (perm !== "granted") { P.denied = perm === "denied"; if (!P.denied) P.err = "The phone didn't allow notifications, so the reminder is still off."; return; }
+      const reg = await swReady(8000);
+      const want = b64uBytes(key);
+      let sub = await reg.pushManager.getSubscription();
+      const has = sub && sub.options && sub.options.applicationServerKey ? new Uint8Array(sub.options.applicationServerKey) : null;
+      if (sub && !sameBytes(has && [...has], [...want])) { await sub.unsubscribe(); sub = null; }
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: want });
+      queueOp({ t: "push", on: true, sub: sub.toJSON(), device: D.setup.device });
+      P.on = true;
+      toast(`Reminder on. This phone gets it around ${remindTime()} every day.` + offlineNote());
+    } catch (e) {
+      P.err = "Couldn't turn it on: " + ((e && e.message) || e);
+    } finally { P.busy = false; renderMe(); }
+  }
+  async function reminderOff() {
+    if (P.busy || !canWrite()) return;
+    P.busy = true; P.err = ""; renderMe();
+    try { const reg = await swReady(4000); const sub = await reg.pushManager.getSubscription(); if (sub) await sub.unsubscribe(); }
+    catch (e) { /* the sheet stops sending either way */ }
+    queueOp({ t: "push", on: false, device: D.setup.device });
+    P.on = false; P.busy = false;
+    renderMe();
+    toast("Reminder off for this phone." + offlineNote());
+  }
+  function reminderTest() {
+    if (isOffline()) { toast("No signal right now. The test needs service."); return; }
+    P.testId = newId("O");
+    queueOp({ id: P.testId, t: "pushtest", device: D.setup.device });
+    toast("Sending a test reminder…");
   }
 
   function typingInMe() {
@@ -1099,6 +1582,7 @@
     catch (e) { setFormBusy(form, false); return showWarn(form, "newKeyWarn", "Couldn't reach your sheet. Check your signal and try again."); }
     if (!res || !res.ok) { setFormBusy(form, false); return showWarn(form, "newKeyWarn", res && res.error === "bad_key" ? "That code doesn't work." : "Your sheet had a problem. Try again in a minute."); }
     D.setup = Object.assign({}, D.setup, { key: code });
+    lsSet("setup", spareOf(D.setup));
     await M.set("setup", D.setup);
     S.keyBad = false;
     toast("Code saved. Syncing now.");
@@ -1131,21 +1615,88 @@
       return;
     }
     try { await M.clearAll(); } catch (e) { /* reload anyway */ }
-    ["tab", "cat", "showNA", "openSecs", "seenAt", "tipDone"].forEach(lsDel);
+    ["tab", "cat", "showNA", "openSecs", "seenAt", "tipDone", "setup", "pin"].forEach(lsDel);
     location.reload();
   }
 
   // ---------------------------------------------------------------- unit page
-  function digits(u) {
-    const cur = C.num((u.v || {}).cur);
-    const min = u.g === "TRK" ? 6 : 5;
-    if (cur === null) return { dim: true, chars: "-".repeat(min).split("") };
+  function digitsOf(cur, truck) {
+    const min = truck ? 6 : 5;
+    if (cur === null || cur === undefined) return { dim: true, chars: "-".repeat(min).split("") };
     return { dim: false, chars: String(Math.round(cur)).padStart(min, "0").split("") };
+  }
+  const digits = u => digitsOf(C.num((u.v || {}).cur), u.g === "TRK");
+  const meterHtml = (d, attrs) => `<div class="meter${d.dim ? " dim" : ""}"${attrs || ""}>${d.chars.map(c => `<span>${esc(c)}</span>`).join("")}</div>`;
+
+  // Update hours / miles: the reading and the date. On machines the meter shows the new reading with a big +
+  // beside it that adds an hour a tap (most days are a handful of hours, so it's quicker than typing), and the
+  // keyboard stays down unless you tap the number. Trucks type their miles.
+  function hoursInputs(u, pre) {
+    const truck = u.g === "TRK", word = C.unitWord(u);
+    const cur = C.num((u.v || {}).cur);
+    const box = pre === "qa" ? S.quick : S.editing;
+    const draft = box && box.draft !== null && box.draft !== undefined ? box.draft : cur;
+    const plus = !truck ? `<button type="button" class="plus-btn" data-action="hrs-plus" data-for="${pre}" aria-label="Add 1 hour">+</button>` : "";
+    return `<div class="meter-line">${meterHtml(digitsOf(draft, truck), ` id="${pre}-meter" aria-hidden="true"`)}${plus}</div>
+      <p class="plus-note" id="${pre}-note" aria-live="polite">${esc(plusNote(cur, draft, word))}</p>
+      <div class="inputs">
+        <label for="${pre}-hours">${truck ? "Miles" : "Hours"}<input id="${pre}-hours" name="hrs" type="text" inputmode="decimal" autocomplete="off" data-for="${pre}" value="${draft === null ? "" : esc(draft)}"></label>
+        <label for="${pre}-read">Date read<input id="${pre}-read" name="date" type="date" value="${esc(C.isoDate(today()))}"></label>
+      </div>`;
+  }
+  function plusNote(cur, n, word) {
+    if (n === null || n === undefined || cur === null) return cur === null ? "No reading yet." : `Last reading ${C.fmtNum(cur)} ${word}.`;
+    const d = Math.round((n - cur) * 10) / 10;
+    return d > 0 ? `+${C.fmtNum(d)} ${word} since the last reading (${C.fmtNum(cur)}).` : d < 0 ? `${C.fmtNum(-d)} ${word} lower than the last reading (${C.fmtNum(cur)}).` : `Last reading ${C.fmtNum(cur)} ${word}.`;
+  }
+  // The + (or typing): the meter and the note follow along without redrawing the form.
+  function hoursDraft(pre, n, fromInput) {
+    const u = S.units.get(pre === "qa" ? (S.quick && S.quick.id) : S.openId);
+    if (!u) return;
+    const box = pre === "qa" ? S.quick : S.editing;
+    if (box) box.draft = n;
+    const m = $("#" + pre + "-meter"), note = $("#" + pre + "-note"), inp = $("#" + pre + "-hours");
+    if (m) { const d = digitsOf(n, u.g === "TRK"); m.className = "meter" + (d.dim ? " dim" : ""); m.innerHTML = d.chars.map(c => `<span>${esc(c)}</span>`).join(""); }
+    if (note) note.textContent = plusNote(C.num((u.v || {}).cur), n, C.unitWord(u));
+    if (inp && !fromInput) inp.value = n === null ? "" : String(n);
+    const form = inp && inp.form;
+    if (form) { delete form.dataset.lower; showWarn(form, pre === "qa" ? "qaWarn" : "hoursWarn", ""); }
+  }
+  function hoursPlus(pre) {
+    const u = S.units.get(pre === "qa" ? (S.quick && S.quick.id) : S.openId);
+    const inp = $("#" + pre + "-hours");
+    if (!u || !inp) return;
+    const typed = C.num(inp.value), cur = C.num((u.v || {}).cur);
+    const base = typed !== null ? typed : cur !== null ? cur : 0;
+    hoursDraft(pre, Math.round((base + 1) * 10) / 10, false);
+  }
+  // What saving the reading changes (or null with a warning shown).
+  function hoursChange(u, form, warnId) {
+    const word = C.unitWord(u);
+    const n = C.num(form.elements.hrs.value);
+    if (n === null || n < 0) { showWarn(form, warnId, "Enter the reading as a number, like 3000."); return null; }
+    const date = form.elements.date.value || C.isoDate(today());
+    const old = C.num((u.v || {}).cur);
+    if (old !== null && n < old && form.dataset.lower !== "1") {
+      form.dataset.lower = "1";
+      showWarn(form, warnId, `That's lower than the last reading (${C.fmtNum(old)} ${word}). Tap Save again to keep it.`);
+      return null;
+    }
+    const patch = { v: {} }, changes = [];
+    if (old !== n) { patch.v.cur = n; changes.push({ key: "cur", label: C.FIELDS.cur.label, section: "HOURS", from: old, to: n, type: "num" }); }
+    if (!same((u.v || {}).read, date)) { patch.v.read = date; changes.push({ key: "read", label: C.FIELDS.read.label, section: "HOURS", from: (u.v || {}).read, to: date, type: "date" }); }
+    return { n, patch, changes };
   }
 
   function renderDetail() {
     const el = $("#detail");
     S.detailStale = false;
+    if (S.adding && !S.openId) {
+      document.body.classList.add("detail-open");
+      if (!el.querySelector("form[data-form='add']") || el.dataset.add !== S.adding) { el.innerHTML = addForm(S.adding); el.dataset.add = S.adding; }
+      return;
+    }
+    el.dataset.add = "";
     const u = S.openId ? S.units.get(S.openId) : null;
     document.body.classList.toggle("detail-open", !!u);
     if (!u) {
@@ -1194,24 +1745,133 @@
     const editing = S.editing && S.editing.type === "hours";
     let html = `<section class="card card-pad meter-card">
       <div class="meter-top"><div class="eyebrow">${truck ? "Odometer" : "Hour meter"}</div>
-        ${!S.readOnly && !editing ? `<button class="btn primary" data-action="hours">Update ${truck ? "miles" : "hours"}</button>` : ""}</div>
-      <div class="meter${d.dim ? " dim" : ""}" aria-label="${cur === null ? "No reading" : esc(C.fmtNum(cur) + " " + word)}">${d.chars.map(c => `<span>${esc(c)}</span>`).join("")}</div>
-      <div class="meter-sub">${cur === null ? "No reading yet" : `<b>${esc(C.fmtNum(cur))} ${word}</b>${read ? " · read " + C.usDate(read) : ""}`}</div>`;
+        ${!S.readOnly && !editing ? `<button class="btn primary" data-action="hours">Update ${truck ? "miles" : "hours"}</button>` : ""}</div>`;
     if (editing) {
-      html += `<form class="editor" data-form="hours">
-        <div class="inputs">
-          <label for="ed-hours">${truck ? "Miles" : "Hours"}<input id="ed-hours" name="hrs" type="text" inputmode="decimal" autocomplete="off" value="${cur === null ? "" : esc(cur)}"></label>
-          <label for="ed-read">Date read<input id="ed-read" name="date" type="date" value="${esc(C.isoDate(today()))}"></label>
-        </div>
+      html += `<form class="editor meter-ed" data-form="hours">${hoursInputs(u, "ed")}
         <p class="warn" id="hoursWarn" hidden></p>
         <div class="row-actions"><button class="btn primary" type="submit">Save</button><button class="btn" type="button" data-action="cancel">Cancel</button></div>
       </form>`;
+    } else {
+      html += `${meterHtml(d, ` aria-label="${cur === null ? "No reading" : esc(C.fmtNum(cur) + " " + word)}"`)}
+      <div class="meter-sub">${cur === null ? "No reading yet" : `<b>${esc(C.fmtNum(cur))} ${word}</b>${read ? " · read " + C.usDate(read) : ""}`}</div>`;
     }
     if (truck) html += `<div class="f-row" style="margin:0 -16px -14px">${fieldCell(u, C.FIELDS.enghrs, false)}</div>`;
     return html + `</section>`;
   }
 
   function latestChange(unitId, key) { return S.changes.find(c => c.unit === unitId && c.key === key && changeState(c) !== "stale") || null; }
+
+  // ---------------------------------------------------------------- adding a unit (the + Add at the bottom of a tab)
+  // The form asks only what identifies it; everything else goes in on its own page after. It gets the next ID for
+  // that kind (TB-04 after TB-03), and starts with the same service intervals as one like it already in the app.
+  function nextId(code) {
+    const pre = C.ID_PREFIX[code];
+    let max = 0;
+    S.units.forEach(u => { const m = String(u.id).match(new RegExp("^" + pre + "-(\\d+)$")); if (m) max = Math.max(max, Number(m[1])); });
+    return pre + "-" + String(max + 1).padStart(2, "0");
+  }
+  // One like it: the same tab and type if there is one, otherwise the same kind of equipment.
+  function templateFor(k, kind) {
+    const code = C.codeOfGroup(k), list = unitsArr().filter(u => u.code === code);
+    return list.find(u => C.groupOf(u) === k && (u.kind || "") === kind) || list.find(u => (u.kind || "") === kind) || list[0] || null;
+  }
+  function addForm(k) {
+    const code = C.codeOfGroup(k), kinds = C.KINDS[code], one = C.oneOf(k), id = nextId(code);
+    const tpl = templateFor(k, kinds ? kinds[0][0] : "");
+    const people = C.LISTS.people || [];
+    return `<div class="d-head">
+        <button class="btn quiet back" data-action="add-cancel">← ${esc(C.groupName(k))}</button>
+        <div class="d-title">
+          <div class="line"><span class="plate lg">${esc(id)}</span><span class="muted">${esc(C.groupName(k))}</span></div>
+          <div class="name-line"><h2>New ${esc(one)}</h2></div>
+        </div></div>
+      <section class="card card-pad add-card">
+        <form class="editor" data-form="add" autocomplete="off">
+          <label for="add-name">Name<input id="add-name" name="name" type="text" maxlength="120" placeholder="What everyone calls it"></label>
+          ${kinds ? `<label for="add-kind">Type<select id="add-kind" name="kind">${kinds.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("")}</select></label>` : ""}
+          <div class="inputs">
+            <label for="add-make">Make<input id="add-make" name="make" type="text" maxlength="60"></label>
+            <label for="add-model">Model<input id="add-model" name="model" type="text" maxlength="60"></label>
+            <label for="add-year">Year<input id="add-year" name="year" type="text" inputmode="numeric" maxlength="4"></label>
+          </div>
+          <label for="add-owner">Assigned to<input id="add-owner" name="owner" type="text" list="dl-add-owner" autocomplete="off"><datalist id="dl-add-owner">${people.map(p => `<option value="${esc(p)}"></option>`).join("")}</datalist></label>
+          <label for="add-serial">Serial # / PIN / VIN<input id="add-serial" name="serial" type="text" autocapitalize="characters" spellcheck="false" maxlength="60"></label>
+          <p class="hint">It gets the next number, ${esc(id)}${tpl ? `, and starts with the same service intervals as ${esc(nameOf(tpl))}` : ""}. Hours, location, filters and the rest go in on its page after you add it.</p>
+          <p class="warn" id="addWarn" hidden></p>
+          <div class="row-actions"><button class="btn primary" type="submit">Add ${esc(one)}</button><button class="btn" type="button" data-action="add-cancel">Cancel</button></div>
+        </form>
+      </section>`;
+  }
+  function openAdd() {
+    if (S.cat === "all" || !S.me.isOwner || S.readOnly || C.NO_TAB.has(S.cat)) return;
+    if (!S.openId) S.listScroll = window.scrollY;
+    S.editing = null; S.attDraft = null; S.quick = null;
+    S.adding = S.cat; S.openId = null;
+    navPush();
+    render();
+    window.scrollTo(0, 0);
+    const d = $("#detail"); if (d) d.scrollTop = 0;
+    const i = $("#add-name"); if (i) i.focus();
+    rootWatch();
+  }
+  function cancelAdd() {
+    const st = history.state;
+    if (NAV.on && st && st.ml && st.add && goBackOne()) return;
+    S.adding = null;
+    render();
+    window.scrollTo(0, S.listScroll || 0);
+    rootWatch();
+  }
+  function saveAdd(form) {
+    const k = S.adding;
+    if (!k || !S.me.isOwner || !canWrite()) return;
+    const code = C.codeOfGroup(k);
+    const val = n => (form.elements[n] ? form.elements[n].value.trim().replace(/\s+/g, " ") : "");
+    const name = val("name");
+    if (!name) return showWarn(form, "addWarn", "Give it a name, the one everyone calls it.");
+    const dup = [...S.units.values()].find(u => nameOf(u).toLowerCase() === name.toLowerCase());
+    if (dup && form.dataset.dup !== name.toLowerCase()) {
+      form.dataset.dup = name.toLowerCase();
+      return showWarn(form, "addWarn", `${dup.id} is already called ${nameOf(dup)}. Tap Add again to add this one anyway.`);
+    }
+    const year = val("year");
+    if (year && !/^(19|20)\d{2}$/.test(year)) return showWarn(form, "addWarn", "Year is 4 digits, like 2021. Or leave it blank.");
+    const kind = form.elements.kind ? form.elements.kind.value : "";
+    const id = nextId(code), tpl = templateFor(k, kind);
+    const probe = { id, code, g: C.CODE_G[code], kind, att: [], v: {} };
+    const v = { name };
+    const log = [{ cid: newId("C"), key: "newunit", p: "newunit", label: "New unit", section: "", from: "", to: name, kind: "" }];
+    ["make", "model", "year", "owner", "serial"].forEach(f => {
+      const x = val(f);
+      if (!x) return;
+      v[f] = x;
+      log.push(logLine({ key: f, label: C.FIELDS[f].label, section: C.FIELDS[f].section, from: "", to: x, type: C.FIELDS[f].type }));
+    });
+    const svc = {};
+    if (tpl) C.SERVICES.forEach(s => {
+      if (!C.applies(probe, s.rule)) return;
+      const t = (tpl.svc || {})[s.key] || {};
+      ["ih", "im"].forEach(sub => {
+        const n = C.num(t[sub]);
+        if (n === null) return;
+        (svc[s.key] = svc[s.key] || {})[sub] = n;
+        log.push(logLine({ key: "svc." + s.key + "." + sub, label: C.SVC_SUB[sub].label, section: s.title, from: "", to: n, type: "num" }));
+      });
+    });
+    let order = -1;
+    S.units.forEach(u => { if (u.code === code && typeof u.order === "number") order = Math.max(order, u.order); });
+    const opId = newId("O");
+    const op = { id: opId, t: "add", unit: id, born: opId, code, kind, v, svc, log, unitName: name, order: order + 1 };
+    if (k.startsWith("ex-")) op.ext = k.slice(3);
+    if (tpl) op.tpl = tpl.id;
+    queueOp(op);
+    S.adding = null;
+    S.openId = id;
+    try { if (NAV.on && history.state && history.state.ml && history.state.add) history.replaceState(screenNow(), ""); } catch (e) { /* fine */ }
+    render();
+    window.scrollTo(0, 0);
+    toast(`Added ${id} ${name}. Fill in the rest here. It's on your Changes list for the master sheet.` + offlineNote());
+  }
 
   function locationPicks(u) {
     const counts = new Map();
@@ -1485,14 +2145,21 @@
   const offlineNote = () => (isOffline() ? " No signal right now, so it's saved on this phone and will send on its own." : "");
   const crewNote = () => (S.me.isOwner ? "" : " It's waiting for approval.");
 
-  function commit(u, patch, changes, msg) {
+  // A change to one unit, with its lines for the Changes list. A unit added on this phone carries the ID of the
+  // update that made it (born), so the sheet never puts the change on a different unit.
+  const logLine = ch => ({
+    cid: newId("C"), key: ch.key, p: ch.p || (ch.key.startsWith("svc.") || ch.key === "att" ? ch.key : "v." + ch.key),
+    label: ch.label, section: ch.section, from: plain(ch.from, ch.type), to: plain(ch.to, ch.type), kind: ch.kind || ""
+  });
+  function queueChange(u, patch, changes) {
     if (!canWrite()) return false;
-    const unitName = (patch.v && patch.v.name) || nameOf(u);
-    const log = changes.map(ch => ({
-      cid: newId("C"), key: ch.key, p: ch.p || (ch.key.startsWith("svc.") || ch.key === "att" ? ch.key : "v." + ch.key),
-      label: ch.label, section: ch.section, from: plain(ch.from, ch.type), to: plain(ch.to, ch.type), kind: ch.kind || ""
-    }));
-    queueOp({ t: "unit", unit: u.id, unitName, patch, log });
+    const op = { t: "unit", unit: u.id, unitName: (patch.v && patch.v.name) || nameOf(u), patch, log: changes.map(logLine) };
+    if (u.born) op.born = u.born;
+    queueOp(op);
+    return true;
+  }
+  function commit(u, patch, changes, msg) {
+    if (!queueChange(u, patch, changes)) return false;
     endEdit();
     render();
     if (!S.me.isOwner) msg = (msg || "Saved.") + " It's waiting for approval.";
@@ -1544,20 +2211,10 @@
 
   function saveHours(form) {
     const u = S.units.get(S.openId); if (!u) return;
-    const word = C.unitWord(u);
-    const n = C.num(form.elements.hrs.value);
-    if (n === null || n < 0) return showWarn(form, "hoursWarn", "Enter the reading as a number, like 3000.");
-    const date = form.elements.date.value || C.isoDate(today());
-    const old = C.num((u.v || {}).cur);
-    if (old !== null && n < old && form.dataset.lower !== "1") {
-      form.dataset.lower = "1";
-      return showWarn(form, "hoursWarn", `That's lower than the last reading (${C.fmtNum(old)} ${word}). Tap Save again to keep it.`);
-    }
-    const patch = { v: {} }, changes = [];
-    if (old !== n) { patch.v.cur = n; changes.push({ key: "cur", label: C.FIELDS.cur.label, section: "HOURS", from: old, to: n, type: "num" }); }
-    if (!same((u.v || {}).read, date)) { patch.v.read = date; changes.push({ key: "read", label: C.FIELDS.read.label, section: "HOURS", from: (u.v || {}).read, to: date, type: "date" }); }
-    if (!changes.length) { endEdit(); renderDetail(); return; }
-    commit(u, patch, changes, `Saved ${C.fmtNum(n)} ${word} for ${nameOf(u)}.`);
+    const r = hoursChange(u, form, "hoursWarn");
+    if (!r) return;
+    if (!r.changes.length) { endEdit(); renderDetail(); return; }
+    commit(u, r.patch, r.changes, `Saved ${C.fmtNum(r.n)} ${C.unitWord(u)} for ${nameOf(u)}.`);
   }
 
   function saveSvc(form) {
@@ -1628,8 +2285,8 @@
     const keep = (u.att || []).filter(a => picked.has(a));
     const old = attWithList(u);
     if (old !== null && old.join("\u0001") === keep.join("\u0001")) { endEdit(); renderDetail(); return; }
-    queueOp({ t: "unit", unit: u.id, unitName: nameOf(u), log: [],
-      patch: { v: { attwith: keep, attwithat: new Date().toISOString(), attwithby: S.me.name } } });
+    queueOp(Object.assign({ t: "unit", unit: u.id, unitName: nameOf(u), log: [],
+      patch: { v: { attwith: keep, attwithat: new Date().toISOString(), attwithby: S.me.name } } }, u.born ? { born: u.born } : {}));
     endEdit();
     render();
     toast((keep.length ? `With ${nameOf(u)}: ${keep.join(", ")}.` : `Marked ${nameOf(u)} as having none of its attachments.`) + offlineNote());
@@ -1712,7 +2369,7 @@
     const newer = S.changes.some(x => x.id !== c.id && x.unit === c.unit && x.key === c.key && String(x.at) > String(c.at) && !["stale", "declined"].includes(changeState(x)));
     if (newer || fieldNow(u, c.key) !== String(expect === null || expect === undefined ? "" : expect)) return null;
     const patch = fieldPatch(c.key, val);
-    return patch ? { t: "unit", unit: u.id, unitName: nameOf(u), patch, log: [] } : null;
+    return patch ? Object.assign({ t: "unit", unit: u.id, unitName: nameOf(u), patch, log: [] }, u.born ? { born: u.born } : {}) : null;
   }
 
   // A coworker's fuel flag or problem: declining it undoes it (the flag goes back, the problem report comes off,
@@ -1774,6 +2431,11 @@
   }
   function masterItem(g) {
     const c = g.latest, key = c.key || "", f = C.FIELDS[key];
+    if (key === "newunit") {   // a row of its own on the master sheet, copied from one like it
+      const u = S.units.get(c.unit) || {}, at = new Date(c.at);
+      return { ids: g.items.map(x => x.id), unit: c.unit, key, type: "newunit", value: String(((u.v || {}).name) || c.to || c.unit),
+        category: C.CATS[u.code] || "", template: u.tpl || "", by: c.by || S.me.name, at: c.at, day: isNaN(at) ? "" : C.isoDate(at) };
+    }
     let type = "text", value = c.to === null || c.to === undefined ? "" : String(c.to);
     if (key === "att") { type = "list"; value = value ? value.split(", ").map(s => s.trim()).filter(Boolean) : []; }
     else if (key.startsWith("svc.")) type = key.split(".")[2] === "ld" ? "date" : "num";
@@ -1835,7 +2497,9 @@
   // next tap, and only when that tap didn't already add a step of its own.
   const NAV = { on: false, atBase: true, pushed: false, ignore: 0, rootW: null };
   const TABS = ["fleet", "due", "changes", "approved", "me"];
-  const screenNow = extra => Object.assign({ ml: 1, tab: S.tab, openId: S.openId || null }, extra || {});
+  // A screen: the tab, the open unit (or the Add form), and the Overdue / Problems / … filter. The quick
+  // buttons on a unit get their own step too (qa), so Back closes them.
+  const screenNow = extra => Object.assign({ ml: 1, tab: S.tab, openId: S.openId || null, add: S.adding || null, st: S.st }, extra || {});
 
   function navStart() {
     if (NAV.on) return;
@@ -1861,7 +2525,8 @@
     NAV.pushed = true;
     try {
       const cur = history.state;
-      if (cur && cur.ml && cur.ed && !(extra && extra.ed)) { history.replaceState(screenNow(extra), ""); return; }
+      // Leaving an open editor or the quick buttons reuses their step, so Back doesn't stop on a screen that looks the same.
+      if (cur && cur.ml && (cur.ed || cur.qa) && !(extra && (extra.ed || extra.qa))) { history.replaceState(screenNow(extra), ""); return; }
       if (cur && cur.ml) history.replaceState(Object.assign({}, cur, { y: window.scrollY }), "");
       history.pushState(screenNow(extra), "");
       NAV.atBase = false;
@@ -1884,10 +2549,16 @@
     if (S.editing && !st.ed) { S.editing = null; S.attDraft = null; }   // Back closes an editor without saving, like Cancel
     const tab = TABS.includes(st.tab) && !(st.tab === "approved" && !S.me.isOwner) ? st.tab : "fleet";
     const id = st.openId && S.units.has(st.openId) ? st.openId : null;
-    const moved = tab !== S.tab || id !== (S.openId || null);
+    const filter = typeof st.st === "string" && st.st ? st.st : "all";
+    const add = !id && st.add && S.me.isOwner ? st.add : null;
+    const qa = st.qa && S.units.has(st.qa) ? st.qa : null;
+    const moved = tab !== S.tab || id !== (S.openId || null) || filter !== S.st || add !== (S.adding || null) || qa !== (S.quick ? S.quick.id : null);
     if (!moved) { if (hadEditor) renderDetail(); rootWatch(); return; }
     S.tab = tab; lsSet("tab", tab);
     S.openId = id;
+    S.st = filter;
+    S.adding = add;
+    S.quick = qa ? { id: qa, mode: null, draft: null } : null;
     S.confirmReset = false;
     render();
     window.scrollTo(0, typeof st.y === "number" ? st.y : 0);
@@ -1901,7 +2572,8 @@
   }
   // On the main list, Chrome on Android also lets the app swallow a Back press outright.
   function rootWatch() {
-    const atRoot = NAV.on && S.phase === "app" && S.tab === "fleet" && !S.openId && !S.editing;
+    // Only the plain main list holds Back. With a filter, the quick buttons or the Add form showing, Back has a step to take.
+    const atRoot = NAV.on && S.phase === "app" && S.tab === "fleet" && !S.openId && !S.editing && !S.adding && !S.quick && S.st === "all";
     if (atRoot && !NAV.rootW && typeof window.CloseWatcher === "function") {
       try {
         const w = new window.CloseWatcher();
@@ -1919,8 +2591,9 @@
   // ---------------------------------------------------------------- navigation
   function setTab(t) {
     if (!TABS.includes(t) || (t === "approved" && !S.me.isOwner)) t = "fleet";
-    if (t === S.tab && (!S.openId || window.innerWidth >= 980)) { window.scrollTo(0, 0); return; }   // already there
-    S.editing = null; S.attDraft = null;
+    if (t === S.tab && (!(S.openId || S.adding) || window.innerWidth >= 980)) { window.scrollTo(0, 0); return; }   // already there
+    S.editing = null; S.attDraft = null; S.quick = null;
+    if (window.innerWidth < 980) S.adding = null;
     S.tab = t; lsSet("tab", t);
     S.confirmReset = false;
     if (S.sendState === "confirm") S.sendState = null;
@@ -1933,8 +2606,8 @@
   }
   function openUnit(id) {
     if (!S.units.has(id) || id === S.openId) return;
-    if (!S.openId) S.listScroll = window.scrollY;
-    S.editing = null; S.attDraft = null;
+    if (!S.openId && !S.adding) S.listScroll = window.scrollY;
+    S.editing = null; S.attDraft = null; S.quick = null; S.adding = null;
     S.openId = id;
     navPush();
     render();
@@ -1943,7 +2616,7 @@
     rootWatch();
   }
   function closeUnit(silent) {
-    S.openId = null; S.editing = null; S.attDraft = null;
+    S.openId = null; S.editing = null; S.attDraft = null; S.adding = null;
     if (silent) return;
     render();
     window.scrollTo(0, S.listScroll || 0);
@@ -1971,6 +2644,8 @@
       if (a === "cancel") { if (L.pin && L.mode !== "unlock") { closeLock(); return; } closeLock(); return; }
       return;
     }
+    // With a unit's quick buttons open, a tap anywhere else just closes them (like Back).
+    if (S.quick && !(e.target.closest && e.target.closest("#qa"))) { e.preventDefault(); closeQuick(); return; }
     const t = e.target.closest("[data-tab],[data-open],[data-cat],[data-st],[data-chf],[data-action]");
     if (!t) return;
     if (t.dataset.tab) {
@@ -1979,8 +2654,8 @@
       return setTab(t.dataset.tab);
     }
     if (t.dataset.open) return openUnit(t.dataset.open);
-    if (t.dataset.cat) { S.cat = t.dataset.cat; lsSet("cat", S.cat); return renderFleet(); }
-    if (t.dataset.st) { S.st = S.st === t.dataset.st ? "all" : t.dataset.st; return renderFleet(); }
+    if (t.dataset.cat) { if (TD.on) return; S.cat = t.dataset.cat; S.quick = null; lsSet("cat", S.cat); return renderFleet(); }
+    if (t.dataset.st) return setSt(t.dataset.st);
     if (t.dataset.chf) { S.chFilter = t.dataset.chf; return renderChanges(); }
     const a = t.dataset.action;
     if (a === "close") {   // "All units" works like Back
@@ -1988,9 +2663,21 @@
       if (NAV.on && st && st.ml && !st.base && st.openId === S.openId && goBackOne()) return;
       return closeUnit();
     }
-    if (a === "clear-filters") { S.q = ""; S.cat = "all"; S.st = "all"; $("#q").value = ""; lsSet("cat", "all"); return renderFleet(); }
+    if (a === "clear-filters") {
+      S.q = ""; S.cat = "all"; S.quick = null; $("#q").value = ""; lsSet("cat", "all");
+      if (S.st !== "all") return setSt("all");
+      return renderFleet();
+    }
+    if (a === "add-unit") return openAdd();
+    if (a === "add-cancel") return cancelAdd();
+    if (a === "qa-close") return closeQuick();
+    if (a === "qa-loc") return quickMode("loc");
+    if (a === "qa-hours") return quickMode("hours");
+    if (a === "qa-fuel") return quickFuel();
+    if (a === "qa-loc-pick") { const inp = $("#qa-loc-in"); if (inp) { inp.value = t.dataset.val; inp.focus(); } return; }
+    if (a === "hrs-plus") return hoursPlus(t.dataset.for);
     if (a === "edit") return startEdit({ type: "field", key: t.dataset.key });
-    if (a === "hours") return startEdit({ type: "hours" });
+    if (a === "hours") { const u = S.units.get(S.openId); return startEdit({ type: "hours", focus: !!u && u.g === "TRK", draft: null }); }
     if (a === "loc") return startEdit({ type: "loc" });
     if (a === "attwith") return startEdit({ type: "attwith", focus: false });
     if (a === "insp") return startEdit({ type: "insp", focus: false });
@@ -2023,6 +2710,9 @@
     if (a === "backup") return downloadBackup();
     if (a === "reset") return resetPhone();
     if (a === "check-update") { toast("Checking for an app update…"); return checkForUpdate(true); }
+    if (a === "remind-on") return reminderOn();
+    if (a === "remind-off") return reminderOff();
+    if (a === "remind-test") return reminderTest();
     if (a === "reload-app") return location.reload();
     if (a === "install") {
       const ev = S.installEvt;
@@ -2043,6 +2733,9 @@
     if (L.open) return;
     if (f.dataset.form === "field") return saveField(f);
     if (f.dataset.form === "hours") return saveHours(f);
+    if (f.dataset.form === "add") return saveAdd(f);
+    if (f.dataset.form === "qa-loc") return quickLoc(f);
+    if (f.dataset.form === "qa-hours") return quickHours(f);
     if (f.dataset.form === "loc") return saveLocation(f);
     if (f.dataset.form === "problem") return saveProblem(f);
     if (f.dataset.form === "svc") return saveSvc(f);
@@ -2055,14 +2748,16 @@
     if (e.target.id === "lockAfter" && L.pin) {
       L.pin = Object.assign({}, L.pin, { after: Number(e.target.value) });
       M.set("pin", L.pin).catch(() => { /* try again next change */ });
+      lsSet("pin", L.pin);
       lsSet("seenAt", Date.now());
       toast(L.pin.after < 0 ? "The app won't ask for your PIN." : L.pin.after === 0 ? "The app asks for your PIN every time you open it." : "Saved.");
       renderMe();
     }
   });
-  // Setup codes: capitals and dashes as you type.
+  // Setup codes: capitals and dashes as you type. A typed reading moves the meter above it.
   document.addEventListener("input", e => {
     const i = e.target;
+    if (i.name === "hrs" && i.dataset && i.dataset.for) { hoursDraft(i.dataset.for, C.num(i.value), true); return; }
     if (!i.classList || !i.classList.contains("code-input")) return;
     const raw = normKey(i.value).slice(0, 12);
     const pretty = raw.replace(/(.{4})(?=.)/g, "$1-");
@@ -2075,6 +2770,7 @@
       return;
     }
     if (e.key === "Escape" && S.editing) { endEdit(); renderDetail(); }
+    else if (e.key === "Escape" && S.quick) closeQuick();
     if (e.key === "Enter" && e.target.id === "ed-att") { e.preventDefault(); const val = e.target.value.trim(); if (val && S.attDraft.length < 6) { S.attDraft.push(val); S.editing.focus = true; renderDetail(); } }
   });
   document.addEventListener("toggle", e => {
@@ -2083,7 +2779,7 @@
     if (d.open) S.openSecs.add(d.dataset.sec); else S.openSecs.delete(d.dataset.sec);
     lsSet("openSecs", [...S.openSecs]);
   }, true);
-  $("#q").addEventListener("input", e => { S.q = e.target.value; renderFleet(); });
+  $("#q").addEventListener("input", e => { S.q = e.target.value; S.quick = null; renderFleet(); });
 
   // for the local test harness only
   window.__ML = { S, D, L, NAV, sync, reloadFromDb, approvedGroups, changeState };

@@ -11,45 +11,75 @@
   "use strict";
   const DB_NAME = "machine-list";
   const STORE = "kv";
-  let dbp = null;
+  const OPEN_MS = 4000;
+  let dbp = null, conn = null, gen = 0;
 
+  // Opens this phone's storage. Now and then a phone (iPhones especially, right after the app comes back)
+  // can't reach its storage for a moment: a stuck open gives up after a few seconds so the next try starts fresh.
   function open() {
     if (dbp) return dbp;
-    dbp = new Promise((resolve, reject) => {
-      let req;
-      try { req = indexedDB.open(DB_NAME, 1); } catch (e) { dbp = null; reject(e); return; }
+    const my = ++gen;
+    const p = new Promise((resolve, reject) => {
+      let req, timer = null, done = false;
+      const fail = err => { if (done) return; done = true; clearTimeout(timer); reject(err); };
+      timer = setTimeout(() => fail(new Error("This phone's storage didn't answer")), OPEN_MS);
+      try { req = indexedDB.open(DB_NAME, 1); } catch (e) { fail(e); return; }
       req.onupgradeneeded = () => {
         const d = req.result;
         if (!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE);
       };
       req.onsuccess = () => {
         const d = req.result;
-        d.onversionchange = () => { try { d.close(); } catch (e) { /* already closed */ } dbp = null; };
-        d.onclose = () => { dbp = null; };
+        if (done || gen !== my) { try { d.close(); } catch (e) { /* a late answer nobody is waiting for */ } fail(new Error("Storage reopened")); return; }
+        done = true;
+        clearTimeout(timer);
+        d.onversionchange = () => { try { d.close(); } catch (e) { /* already closed */ } if (gen === my) { dbp = null; conn = null; } };
+        d.onclose = () => { if (gen === my) { dbp = null; conn = null; } };
+        conn = d;
         resolve(d);
       };
-      req.onerror = () => { dbp = null; reject(req.error || new Error("Couldn't open this phone's storage")); };
+      req.onerror = () => fail(req.error || new Error("Couldn't open this phone's storage"));
     });
-    return dbp;
+    dbp = p;
+    p.catch(() => { if (gen === my) { dbp = null; conn = null; } });
+    return p;
   }
 
-  // Runs one transaction. Phones sometimes close storage while the app is in the background,
-  // so a closed connection gets one fresh try.
-  function run(mode, body, again) {
+  // Drops the connection, so the next step opens a fresh one.
+  function reset() {
+    gen++;
+    dbp = null;
+    const d = conn;
+    conn = null;
+    if (d) { try { d.close(); } catch (e) { /* already closed */ } }
+  }
+
+  function attempt(mode, body) {
     return open().then(d => new Promise((resolve, reject) => {
       let t;
-      try { t = d.transaction(STORE, mode); }
-      catch (e) {
-        dbp = null;
-        if (!again) { run(mode, body, true).then(resolve, reject); return; }
-        reject(e); return;
-      }
+      try { t = d.transaction(STORE, mode); } catch (e) { reject(e); return; }
       let out;
-      try { out = body(t.objectStore(STORE)); } catch (e) { try { t.abort(); } catch (x) { /* done */ } reject(e); return; }
+      try { out = body(t.objectStore(STORE)); }
+      catch (e) {
+        try { t.abort(); } catch (x) { /* done */ }
+        try { e.mine = true; } catch (x) { /* plain value */ }
+        reject(e);
+        return;
+      }
       t.oncomplete = () => resolve(typeof out === "function" ? out() : out);
       t.onerror = () => reject(t.error || new Error("Storage error"));
       t.onabort = () => reject(t.error || new Error("Storage write was cancelled"));
     }));
+  }
+
+  // Runs one transaction. Phones sometimes drop their storage connection while the app is in the background
+  // (the step fails, nothing is half-saved), so a failed step gets one more try on a fresh connection.
+  function run(mode, body) {
+    return attempt(mode, body).catch(err => {
+      if (err && (err.mine || err.name === "QuotaExceededError" || err.name === "DataCloneError")) throw err;
+      reset();
+      return new Promise(r => setTimeout(r, 150)).then(() => attempt(mode, body));
+    });
   }
 
   function get(key) {
@@ -112,6 +142,7 @@
       key: setup.key, device: setup.device || "", app: root.ML_VERSION || "",
       ver: base && base.ver ? String(base.ver) : "", full: !!opts.full || !base, ops
     };
+    if (opts.hello) req.hello = opts.hello;   // a note for the sheet's Sync tab: this phone just set up, or got past a storage hiccup
     let res;
     try { res = await post(setup.url, req, opts.timeout); }
     catch (e) {
@@ -146,5 +177,5 @@
     return fn();
   }
 
-  root.MLSync = { open, get, set, del, clearAll, update, addOp, dropOps, post, syncOnce, syncAll, withLock };
+  root.MLSync = { open, reset, get, set, del, clearAll, update, addOp, dropOps, post, syncOnce, syncAll, withLock };
 })(typeof self !== "undefined" ? self : globalThis);

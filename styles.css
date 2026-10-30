@@ -433,3 +433,46 @@ body.locked > header, body.locked > main { visibility: hidden; }
 /* Fleet list: a sideways swipe steps through the equipment tabs (the tab row above still scrolls sideways) */
 #fleetBody, #summary { touch-action: pan-y pinch-zoom; }
 .prob-text .pill { margin-left: 6px; vertical-align: 2px; white-space: nowrap; }
+
+/* ---------- press and hold: a long press is the app's, not the browser's text selection or menu */
+.unit-row, .chips .chip { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+
+/* Quick buttons on a unit: a small control panel that opens under the row you held */
+.unit-row.qa-on { background: var(--accent-soft); box-shadow: inset 6px 0 0 var(--accent); }
+.qa { border-top: 1px solid var(--line); background: var(--surface-2); padding: 10px 12px 12px 14px; display: grid; gap: 12px; }
+.qa-head { display: flex; align-items: stretch; gap: 8px; }
+.qa-btns { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(var(--n, 3), minmax(0, 1fr)); gap: 8px; }
+.qa-btn { appearance: none; display: grid; justify-items: center; align-content: center; gap: 6px; min-height: 72px; padding: 10px 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font: 600 14px/1.1 var(--f-body); touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.qa-btn svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.qa-btn:active { background: var(--accent-soft); }
+.qa-btn[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+.qa-btn.fuel { color: var(--over); }
+.qa-btn.fuel.needs { color: var(--ok); }
+.qa-btn span { color: var(--ink); }
+.qa-x { appearance: none; flex: none; width: 40px; border: 0; border-radius: 10px; background: none; color: var(--ink-2); font-size: 18px; }
+.qa-x:hover { background: var(--surface); }
+.qa .editor { padding: 0; }
+
+/* Update hours: the meter shows the new reading, with a big + beside it (one hour a tap) */
+.meter-line { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.plus-btn { appearance: none; flex: none; display: grid; place-items: center; width: 84px; height: 60px; padding: 0 0 4px; border: 0; border-radius: 12px; background: var(--accent); color: var(--accent-ink); font: 700 46px/1 var(--f-display); box-shadow: 0 4px 0 var(--rivet); touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.plus-btn:active { transform: translateY(3px); box-shadow: 0 1px 0 var(--rivet); }
+.plus-note { margin: -2px 0 0; font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.meter-ed { padding-top: 0; gap: 12px; }
+.qa .meter span { width: 26px; height: 38px; font-size: 22px; }
+.qa .plus-btn { height: 56px; width: 80px; }
+
+/* Moving an equipment tab: it lifts, the others make room (and shuffle a little, like a phone's home screen) */
+.chips.arranging { padding-block: 6px; margin-block: -6px; }
+.chips.arranging .chip { transition: transform .16s ease; }
+.chips.arranging .chip.lifted { position: relative; z-index: 2; transition: none; background: var(--accent); border-color: var(--accent); color: var(--accent-ink); box-shadow: 0 6px 16px rgba(16, 22, 28, .24); }
+.chips.arranging .chip:not(.lifted):not([data-cat="all"]) { animation: chip-shuffle .28s ease-in-out infinite alternate; }
+@keyframes chip-shuffle { from { rotate: -1.4deg; } to { rotate: 1.4deg; } }
+@media (prefers-reduced-motion: reduce) { .chips.arranging .chip { animation: none !important; transition: none; } }
+
+/* + Add at the bottom of a tab: small on purpose */
+.add-row { display: flex; justify-content: center; padding: 2px 0 8px; }
+.add-unit { appearance: none; min-height: 36px; padding: 9px 15px; border: 1px dashed var(--ink-2); border-radius: 999px; background: transparent; color: var(--ink-2); font: 600 13px/1 var(--f-body); }
+.add-unit:hover { color: var(--ink); border-color: var(--ink); background: var(--surface); }
+.add-card .editor { padding: 0; gap: 12px; }
+.add-card .hint { margin: 0; }

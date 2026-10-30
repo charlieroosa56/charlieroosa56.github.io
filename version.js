@@ -1,1 +1,1 @@
-self.ML_VERSION = "2026.10.26-ab48cd";
+self.ML_VERSION = "2026.10.30-2e606b";

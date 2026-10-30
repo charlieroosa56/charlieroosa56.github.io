@@ -1,7 +1,7 @@
 /* Machine List background helper. It keeps a copy of the app on this phone so the app opens with no
    signal, and on Android it sends waiting updates by itself once there's service, even with the app closed.
    The build fills in the version and file list below; a new version replaces the old copy. */
-self.ML_VERSION = "2026.10.26-ab48cd";
+self.ML_VERSION = "2026.10.30-2e606b";
 importScripts("sync-core.js");
 
 const CACHE = "ml-" + self.ML_VERSION;
@@ -19,6 +19,7 @@ const FILES = [
  "fonts/ibm-plex-mono-latin-500-normal.woff2",
  "fonts/ibm-plex-mono-latin-600-normal.woff2",
  "icons/apple-touch-icon.png",
+ "icons/badge-96.png",
  "icons/icon-192.png",
  "icons/icon-512.png",
  "icons/icon-maskable-512.png",
@@ -72,6 +73,62 @@ self.addEventListener("fetch", event => {
     const cache = await caches.open(CACHE);
     const hit = await cache.match(req, { ignoreSearch: true });
     return hit || fetch(req);
+  })());
+});
+
+// The daily reminder: your sheet sends an empty push around 6:30 PM; this gets the latest from the sheet if it
+// can (a few seconds at most), then says what's waiting from this phone's own copy.
+async function reminderText() {
+  const base = await MLSync.get("base");
+  const st = base && base.state;
+  if (!st) return { title: "Machine List", body: "Tap to check today's updates." };
+  const changes = Array.isArray(st.changes) ? st.changes : [];
+  const waiting = changes.filter(c => c && !c.synced && !c.approval && !/^not used/i.test(c.note || "")).length;
+  const probs = (st.problems || []).filter(p => p && p.status === "open").length;
+  const fuel = (st.units || []).filter(u => u && u.fuel && u.fuel.needs).length;
+  const out = [];
+  if (waiting) out.push(waiting === 1 ? "1 change is waiting for your OK." : waiting + " changes are waiting for your OK.");
+  if (probs) out.push(probs === 1 ? "1 problem is open." : probs + " problems are open.");
+  if (fuel) out.push(fuel === 1 ? "1 unit needs fuel." : fuel + " units need fuel.");
+  return { title: (st.config && st.config.brand) || "Machine List", body: out.length ? out.join(" ") : "Nothing is waiting on you. Tap to look things over." };
+}
+self.addEventListener("push", event => {
+  event.waitUntil((async () => {
+    try { await Promise.race([MLSync.withLock(() => MLSync.syncAll({ timeout: 7000 })), new Promise(r => setTimeout(r, 8000))]); }
+    catch (e) { /* show what's on the phone */ }
+    let t = { title: "Machine List", body: "Tap to check today's updates." };
+    try { t = await reminderText(); } catch (e) { /* plain note */ }
+    await self.registration.showNotification(t.title, {
+      body: t.body, tag: "ml-daily", renotify: true, icon: "icons/icon-192.png", badge: "icons/badge-96.png",
+      data: { url: new URL("./?open=changes", SCOPE).href }
+    });
+  })());
+});
+// Tapping it opens the app on the Changes tab (or brings the open app forward and switches to it).
+self.addEventListener("notificationclick", event => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const wins = (await self.clients.matchAll({ type: "window", includeUncontrolled: true })).filter(w => isOurPage(w.url));
+    if (wins.length) {
+      const w = wins.find(x => x.visibilityState === "visible") || wins[0];
+      try { await w.focus(); } catch (e) { /* not allowed to focus */ }
+      w.postMessage({ t: "open", tab: "changes" });
+      return;
+    }
+    await self.clients.openWindow((event.notification.data && event.notification.data.url) || SCOPE.href);
+  })());
+});
+// The push service changed this phone's address: sign up again with the same key and tell the sheet.
+self.addEventListener("pushsubscriptionchange", event => {
+  event.waitUntil((async () => {
+    const base = await MLSync.get("base"), setup = await MLSync.get("setup");
+    const key = base && base.state && base.state.config && base.state.config.pushKey;
+    if (!key || !setup) return;
+    const raw = atob((key + "===".slice((key.length + 3) % 4)).replace(/-/g, "+").replace(/_/g, "/"));
+    const sub = await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(raw, c => c.charCodeAt(0)) });
+    const id = "O-" + Date.now().toString(36).toUpperCase() + "-SUBX";
+    await MLSync.addOp({ id, t: "push", at: new Date().toISOString(), on: true, sub: sub.toJSON(), device: setup.device || "" });
+    await MLSync.withLock(() => MLSync.syncAll({ timeout: 20000 }));
   })());
 });
 

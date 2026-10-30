@@ -20,8 +20,24 @@
   const EX_NAMES = { mini: "Mini Excavators", zero: "Zero Turn Excavators", conv: "Counterweight Excavators" };
   const GROUP_ORDER = ["ex-mini", "ex-zero", "ex-conv", "DT", "PU", "P", "S", "M", "D", "H", "R", "LF", "TC", "TB", "TR", "C", "T"];
   const NO_TAB = new Set(["C", "T"]);   // small engines get no tab; people's own saws and plates go in their section
-  const groupOf = u => (u.code === "E" ? "ex-" + (EX_TYPE[u.id] || "conv") : u.code);
+  // An excavator added in the app carries its own group (ext) until the sheet's Settings lists say otherwise.
+  const groupOf = u => (u.code === "E" ? "ex-" + (EX_TYPE[u.id] || (u.ext === "mini" || u.ext === "zero" ? u.ext : "conv")) : u.code);
   const groupName = k => (String(k).startsWith("ex-") ? EX_NAMES[k.slice(3)] : CATS[k]) || "Other";
+  const codeOfGroup = k => (String(k).startsWith("ex-") ? "E" : String(k));
+
+  // New units: the letters their IDs start with (the same as the master sheet), the field group each kind of
+  // equipment uses, and the types to pick from where the type changes which fields apply.
+  const ID_PREFIX = { E: "EX", P: "PL", S: "SS", M: "ML", D: "DZ", H: "HT", R: "RL", LF: "LF", C: "CP", T: "SE", DT: "DT", TC: "TC", PU: "PU", TB: "TB", TR: "TR" };
+  const CODE_G = { E: "HEQ", P: "HEQ", S: "HEQ", M: "HEQ", D: "HEQ", H: "HEQ", R: "HEQ", LF: "HEQ", C: "SML", T: "SML", DT: "TRK", TC: "TRK", PU: "TRK", TB: "TOW", TR: "TRL" };
+  const KINDS = {
+    TB: [["light", "Light tower"], ["comp", "Air compressor"], ["mixer", "Mixer"], ["", "Something else"]],
+    TR: [["", "Equipment trailer"], ["lowboy", "Lowboy"], ["flowboy", "Flow boy"], ["dumptrl", "Dump trailer"]]
+  };
+  // One of them, the way a sentence would say it: "a tow-behind", "an excavator".
+  const ONE_OF = { "ex-mini": "mini excavator", "ex-zero": "zero turn excavator", "ex-conv": "counterweight excavator", P: "payloader", S: "skid steer",
+    M: "mini loader", D: "dozer", H: "haul truck", R: "roller", LF: "lift", DT: "dump truck", TC: "tractor", PU: "pickup or service truck", TB: "tow-behind", TR: "trailer",
+    C: "compaction machine", T: "saw or tool" };
+  const oneOf = k => ONE_OF[k] || "unit";
 
   const isTwo = u => u.kind === "demo" || u.kind === "chain";
   const hasHammer = u => (u.att || []).some(a => /hammer/i.test(a));
@@ -487,7 +503,8 @@
   const ownerShort = personName;
 
   root.EQ_CORE = {
-    CATS, CAT_ORDER, EX_TYPE, GROUP_ORDER, NO_TAB, groupOf, groupName, R, LISTS, PEOPLE, SECTIONS, FIELDS, SERVICES, SVC, SVC_SUB,
+    CATS, CAT_ORDER, EX_TYPE, GROUP_ORDER, NO_TAB, groupOf, groupName, codeOfGroup, ID_PREFIX, CODE_G, KINDS, oneOf,
+    R, LISTS, PEOPLE, SECTIONS, FIELDS, SERVICES, SVC, SVC_SUB,
     applies, usesMeter, unitWord, catName, num, parseDate, isoDate, usDate, addMonths, startOfToday,
     serviceStatus, expiryStatus, servicesFor, unitIssues, unitStatus, displayValue, fmtNum, ownerShort, personName, atShop,
     MONTHS, monthYear, inspStatus, inspDone, inspExpiry, configure
