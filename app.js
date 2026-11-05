@@ -290,7 +290,7 @@
   // ---------------------------------------------------------------- boot
   async function init() {
     S.tab = "fleet";   // the app always opens on the main list, where Back stays put
-    S.cat = lsGet("cat", "all");   // which equipment tab was open last
+    S.cat = lsGet("cat", "");   // which equipment tab was open last (none yet: picked once the list is in)
     const skips = lsGet("skips", {});
     S.sendSkips = skips && typeof skips === "object" ? skips : {};
     S.showNA = lsGet("showNA", false);
@@ -867,22 +867,25 @@
     $("#summary").innerHTML = tiles.map(([k, l]) =>
       `<button class="sum ${k}" data-st="${k}" aria-pressed="${S.st === k}"><b class="num">${count(k)}</b><span>${l}</span></button>`).join("");
 
-    // Tabs: All, then each kind of equipment in the owner's order. No tabs for people or small engines.
+    // Tabs: Me (what's assigned to whoever is signed in), All, then each kind of equipment in the owner's order.
+    // No tabs for small engines. A coworker with their own machine opens on Me the first time.
     const chips = $("#whoChips");
     const order = groupOrder();
     const tabs = order.filter(k => !C.NO_TAB.has(k) && all.some(x => x.g === k));
-    if (S.cat !== "all" && !tabs.includes(S.cat)) S.cat = "all";
+    const hasMine = all.some(x => isMine(x.u));
+    if (!S.cat) S.cat = hasMine && !S.me.isOwner ? "me" : "all";
+    if (S.cat === "me" ? !hasMine : S.cat !== "all" && !tabs.includes(S.cat)) S.cat = "all";
     if (!TD.on) {   // never redraw the row under a finger that's moving a tab
       chips.classList.toggle("wrap", finePointer());   // with a mouse, show every tab instead of a row to swipe
       chips.classList.toggle("movable", canArrange());
-      chips.innerHTML = [["all", "All"]].concat(tabs.map(k => [k, C.groupName(k)])).map(([k, l]) =>
+      chips.innerHTML = (hasMine ? [["me", "Me"]] : []).concat([["all", "All"]], tabs.map(k => [k, C.groupName(k)])).map(([k, l]) =>
         `<button class="chip" data-cat="${esc(k)}" aria-pressed="${S.cat === k}">${esc(l)}</button>`).join("");
       if (!S.chipsPlaced && chips.offsetParent) { S.chipsPlaced = true; showPressedChip(chips); }
     }
 
     const terms = S.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const rows = all.filter(({ u, s, g }) =>
-      (S.cat === "all" || g === S.cat) && matchSt(u, s.st) &&
+      (S.cat === "all" || (S.cat === "me" ? isMine(u) : g === S.cat)) && matchSt(u, s.st) &&
       (!terms.length || terms.every(term => haystack(u).includes(term))));
     if (!rows.length) {
       body.innerHTML = noticeCards() + `<div class="card empty-state"><h3>No matches</h3><p>Nothing fits that search and filter. Clear the search or pick All.</p><p style="margin-top:12px"><button class="btn" data-action="clear-filters">Clear search and filters</button></p></div>` + addRow();
@@ -890,14 +893,16 @@
     }
     const section = (title, list, opts) => `<section class="group"><div class="group-h"><h2>${esc(title)}</h2><span>${list.length}</span></div>${list.map(r => unitRow(r.u, r.s, opts) + quickPanel(r.u)).join("")}</section>`;
     let html = noticeCards() + tipCard();
-    if (S.cat !== "all") {
+    const at = k => { const i = order.indexOf(k); return i < 0 ? 99 : i; };
+    if (S.cat === "me") {
+      html += section("My equipment", rows.slice().sort((a, b) => at(a.g) - at(b.g)), { mine: true });
+    } else if (S.cat !== "all") {
       html += section(C.groupName(S.cat), rows) + addRow();   // a tab shows every unit of that kind, whoever it belongs to
     } else {
       const gear = rows.filter(r => !r.p);
       const kind = k => gear.filter(r => r.g === k);
       order.filter(k => !C.NO_TAB.has(k)).forEach(k => { const g = kind(k); if (g.length) html += section(C.groupName(k), g); });
       // Each person's own gear in one section: their truck first, then what rides in it.
-      const at = k => { const i = order.indexOf(k); return i < 0 ? 99 : i; };
       [...new Set(rows.filter(r => r.p).map(r => r.p))].sort((a, b) => personRank(a) - personRank(b) || a.localeCompare(b))
         .forEach(p => { html += section(p, rows.filter(r => r.p === p).sort((a, b) => at(a.g) - at(b.g)), { mine: true }); });
       order.filter(k => C.NO_TAB.has(k)).forEach(k => { const g = kind(k); if (g.length) html += section(C.groupName(k), g); });
@@ -907,18 +912,24 @@
     body.innerHTML = html;
   }
 
-  // At the bottom of one kind's tab (never under All): a small way to add another one of them.
+  // At the bottom of one kind's tab (never under All or Me): a small way to add another one of them.
   function addRow() {
-    if (S.cat === "all" || !S.me.isOwner || S.readOnly || C.NO_TAB.has(S.cat)) return "";
+    if (S.cat === "all" || S.cat === "me" || !S.me.isOwner || S.readOnly || C.NO_TAB.has(S.cat)) return "";
     return `<div class="add-row"><button type="button" class="add-unit" data-action="add-unit">+ Add a ${esc(C.oneOf(S.cat))}</button></div>`;
   }
 
   // A unit that is one person's own gear (their truck and what rides in it) sits in that person's section.
-  // Shop, Everyone and Unassigned aren't people, so their gear stays with its kind of equipment.
+  // Shop, Everyone and Unassigned aren't people, so their gear stays with its kind of equipment. So does a machine
+  // (excavator, loader, dozer...) that's someone's to run: it stays with the others of its kind, with their name on it.
   const NOT_PERSON = /^(everyone|shared|all|shop|unassigned)$/i;
   function personOf(u) {
     const o = C.personName((u.v || {}).owner);
-    return o && !NOT_PERSON.test(o) ? o : "";
+    return o && !NOT_PERSON.test(o) && C.CODE_G[u.code] !== "HEQ" ? o : "";
+  }
+  // Assigned to whoever is signed in on this phone: what the Me tab shows.
+  function isMine(u) {
+    const me = String(S.me.name || "").trim().toLowerCase();
+    return !!me && C.personName((u.v || {}).owner).trim().toLowerCase() === me;
   }
   // People's sections go in the order of the People list on the sheet's Settings tab.
   function personRank(p) {
@@ -1178,22 +1189,24 @@
   document.addEventListener("click", e => { if (Date.now() < hold.until) { e.preventDefault(); e.stopImmediatePropagation(); hold.until = 0; } }, true);
 
   // ---------------------------------------------------------------- rearranging the equipment tabs
-  // Press and hold a tab (not All) until it lifts, slide it along the row, and let go where it should go. The
-  // others make room as it passes. All always stays first. The order is saved to your sheet, so every phone
+  // Press and hold a tab (not Me or All) until it lifts, slide it along the row, and let go where it should go. The
+  // others make room as it passes. Me and All always stay first. The order is saved to your sheet, so every phone
   // (the crew's too) shows the tabs in the same order. Only the owner can move them.
   const canArrange = () => S.me.isOwner && !S.readOnly && S.phase === "app";
-  const TD = { on: false, el: null, row: null, items: [], from: 0, to: 0, x0: 0, s0: 0, fx: 0, w: 0, gap: 6, raf: 0, edge: 0 };
+  const FIXED_TAB = /^(me|all)$/;
+  const TD = { on: false, el: null, row: null, items: [], from: 0, to: 0, first: 1, x0: 0, s0: 0, fx: 0, w: 0, gap: 6, raf: 0, edge: 0 };
   function dragBegin(el) {
     const row = $("#whoChips");
-    if (!row || !el || !el.isConnected || el.dataset.cat === "all") return;
+    if (!row || !el || !el.isConnected || FIXED_TAB.test(el.dataset.cat)) return;
     buzz();
     const rr = row.getBoundingClientRect();
     const btns = [...row.querySelectorAll(".chip[data-cat]")];
     const items = btns.map(b => { const r = b.getBoundingClientRect(); return { el: b, key: b.dataset.cat, left: r.left - rr.left + row.scrollLeft, w: r.width }; });
     const from = items.findIndex(x => x.el === el);
-    if (from < 1) return;
+    const first = items.findIndex(x => !FIXED_TAB.test(x.key));   // Me and All stay in front
+    if (first < 1 || from < first) return;
     const gap = items.length > 1 ? Math.max(0, items[1].left - (items[0].left + items[0].w)) : 6;
-    Object.assign(TD, { on: true, el, row, items, from, to: from, x0: hold.x, s0: row.scrollLeft, fx: hold.x, w: items[from].w, gap, edge: 0 });
+    Object.assign(TD, { on: true, el, row, items, from, to: from, first, x0: hold.x, s0: row.scrollLeft, fx: hold.x, w: items[from].w, gap, edge: 0 });
     row.classList.add("arranging");
     el.classList.add("lifted");
     el.setAttribute("aria-grabbed", "true");
@@ -1217,15 +1230,15 @@
   }
   // Where the lifted tab is now, and which way the others slide to make room.
   function dragPaint() {
-    const { items, from } = TD;
+    const { items, from, first } = TD;
     const dx = (TD.fx - TD.x0) + (TD.row.scrollLeft - TD.s0);
-    const minLeft = items[1].left - items[from].left;   // never in front of All
+    const minLeft = items[first].left - items[from].left;   // never in front of Me or All
     const maxLeft = (items[items.length - 1].left + items[items.length - 1].w) - (items[from].left + items[from].w);
     const off = Math.max(minLeft, Math.min(maxLeft, dx));
     // Its leading edge passing the middle of a neighbor swaps them (tabs aren't all the same width).
     const lead = items[from].left + off, tail = lead + TD.w;
     let to = from;
-    for (let i = 1; i < items.length; i++) {
+    for (let i = first; i < items.length; i++) {
       if (i === from) continue;
       const c = items[i].left + items[i].w / 2;
       if (i < from && lead < c) { to = Math.min(to, i); }
@@ -1242,15 +1255,15 @@
   function dragEnd(cancel) {
     if (!TD.on) return;
     cancelAnimationFrame(TD.raf); TD.raf = 0;
-    const { items, from, to, row } = TD;
+    const { items, from, to, row, first } = TD;
     TD.on = false;
     row.classList.remove("arranging");
     items.forEach(it => { it.el.style.transform = ""; it.el.classList.remove("lifted"); it.el.removeAttribute("aria-grabbed"); });
     hold.until = Date.now() + 120;   // the lift at the end isn't a tap on the tab
     if (cancel || to === from) { renderFleet(); return; }
-    const keys = items.map(it => it.key).filter(k => k !== "all");
-    const moved = keys.splice(from - 1, 1)[0];
-    keys.splice(to - 1, 0, moved);
+    const keys = items.map(it => it.key).filter(k => !FIXED_TAB.test(k));
+    const moved = keys.splice(from - first, 1)[0];
+    keys.splice(to - first, 0, moved);
     // Tabs that aren't showing (no units of that kind yet) keep their places after the ones that are.
     const full = keys.concat(groupOrder().filter(k => !keys.includes(k)));
     queueOp({ t: "taborder", order: full });
@@ -1263,7 +1276,7 @@
     const chip = e => (e.target.closest ? e.target.closest(".chip[data-cat]") : null);
     row.addEventListener("touchstart", e => {
       const c = chip(e);
-      if (!c || c.dataset.cat === "all" || !canArrange() || !e.touches || e.touches.length !== 1) return;
+      if (!c || FIXED_TAB.test(c.dataset.cat) || !canArrange() || !e.touches || e.touches.length !== 1) return;
       holdStart(c, e.touches[0].clientX, e.touches[0].clientY, true, () => dragBegin(c));
     }, { passive: true });
     // Once a tab is lifted, the finger moves it instead of scrolling the row.
@@ -1277,7 +1290,7 @@
     row.addEventListener("touchcancel", () => { holdCancel(); dragEnd(true); }, { passive: true });
     row.addEventListener("mousedown", e => {
       const c = chip(e);
-      if (!c || c.dataset.cat === "all" || e.button !== 0 || !canArrange() || Date.now() - lastTouch < 800) return;
+      if (!c || FIXED_TAB.test(c.dataset.cat) || e.button !== 0 || !canArrange() || Date.now() - lastTouch < 800) return;
       holdStart(c, e.clientX, e.clientY, false, () => dragBegin(c));
     });
     window.addEventListener("mousemove", e => { if (TD.on) { e.preventDefault(); dragMove(e.clientX); } else holdMove(e.clientX, e.clientY); });
@@ -1903,7 +1916,7 @@
       </section>`;
   }
   function openAdd() {
-    if (S.cat === "all" || !S.me.isOwner || S.readOnly || C.NO_TAB.has(S.cat)) return;
+    if (S.cat === "all" || S.cat === "me" || !S.me.isOwner || S.readOnly || C.NO_TAB.has(S.cat)) return;
     if (!S.openId) S.listScroll = window.scrollY;
     S.editing = null; S.attDraft = null; S.quick = null;
     S.adding = S.cat; S.openId = null;
