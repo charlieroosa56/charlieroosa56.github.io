@@ -476,3 +476,19 @@ body.locked > header, body.locked > main { visibility: hidden; }
 .add-unit:hover { color: var(--ink); border-color: var(--ink); background: var(--surface); }
 .add-card .editor { padding: 0; gap: 12px; }
 .add-card .hint { margin: 0; }
+
+/* Add machine, right above the search: anyone can add one (a coworker's waits for approval) */
+.add-machine { appearance: none; width: 100%; min-height: 46px; display: flex; align-items: center; gap: 12px; padding: 5px 14px 5px 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font: 600 16px/1 var(--f-body); text-align: left; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.add-machine .add-plus { flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 7px; background: var(--accent); color: var(--accent-ink); }
+.add-machine svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; }
+.add-machine:hover { border-color: var(--ink-2); }
+.add-machine:active { background: var(--accent-soft); }
+.tag.new { background: var(--accent); color: var(--accent-ink); }
+.new-card { display: grid; gap: 12px; border-color: var(--accent); background: var(--accent-soft); }
+.new-card p { margin: 0; max-width: 62ch; }
+.new-card b { font-weight: 600; }
+.add-like { display: grid; gap: 6px; }
+.add-like p { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.add-like .like { appearance: none; display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--ink); font: 600 15px/1.2 var(--f-body); text-align: left; cursor: pointer; }
+.add-like .like span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.add-like .like:hover { border-color: var(--ink-2); }

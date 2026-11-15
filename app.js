@@ -108,6 +108,7 @@
     D.config = st.config || {};
     D.sheetUrl = st.sheetUrl || "";
     D.changesTotal = Number(st.changesTotal) || D.changes.length;
+    D.taken = Array.isArray(st.taken) ? st.taken.map(String) : [];   // every ID in use, even ones this phone can't see yet
     D.ver = String(ver || "");
     D.baseAt = at || 0;
     D.loaded = true;
@@ -125,45 +126,54 @@
     if (name) name.textContent = c.brand || "Machine List";
   }
 
-  // A unit added on this phone, as it looks before the sheet has it.
+  // A unit added on this phone, as it looks before the sheet has it. One a coworker adds waits for approval.
   function unitFromAdd(op) {
     const u = { att: [], code: op.code, g: C.CODE_G[op.code] || "HEQ", id: op.unit, kind: op.kind || "", order: op.order, svc: clone(op.svc || {}),
       unconfirmed: [], v: Object.assign({}, op.v || {}, { status: "Active" }), born: op.born };
     if (op.ext) u.ext = op.ext;
     if (op.tpl) u.tpl = op.tpl;
+    if (!S.me.isOwner) { u.pending = true; u.by = S.me.name; }
     return u;
   }
+  // An update for a unit added in the app names the update that made it (born), so it still finds the unit if it
+  // went in under the next free ID because another phone got that one first.
+  const withBorn = (u, op) => (u && u.born ? Object.assign(op, { born: u.born }) : op);
 
   // The sheet's copy with this phone's waiting updates laid on top, so the screen shows them right away.
   function derive() {
     const units = new Map(D.units);
+    const born = new Map();   // the update that made a unit added in the app -> its ID on the sheet
+    units.forEach(u => { if (u.born) born.set(u.born, u.id); });
+    const idOf = op => (op.born && born.get(op.born)) || op.unit;
     const pend = [];
     let problems = D.problems.slice();
     let tabOrder = Array.isArray(D.config && D.config.tabOrder) ? D.config.tabOrder : [];
     const appr = new Map(), copied = new Map();
-    const logPend = op => (op.log || []).forEach(l => pend.push({ id: l.cid, at: op.at, by: S.me.name, unit: op.unit, unitName: op.unitName || (op.v && op.v.name),
+    const logPend = (op, id) => (op.log || []).forEach(l => pend.push({ id: l.cid, at: op.at, by: S.me.name, unit: id || op.unit, unitName: op.unitName || (op.v && op.v.name),
       section: l.section, label: l.label, key: l.key, from: l.from, to: l.to, approval: "", synced: "", note: l.kind === "confirm" ? "Confirmed" : "", pending: true }));
     D.outbox.forEach(op => {
       if (op.t === "unit") {
-        const u = units.get(op.unit); if (!u) return;
-        if (op.born && u.born !== op.born) return;   // meant for a unit this phone added that went in under another ID
-        units.set(op.unit, merge(clone(u), op.patch || {}));
-        logPend(op);
+        const id = idOf(op), u = units.get(id); if (!u) return;
+        if (op.born && u.born !== op.born) return;   // meant for a unit this phone added that never went in
+        units.set(id, merge(clone(u), op.patch || {}));
+        logPend(op, id);
       } else if (op.t === "add") {
-        const u = units.get(op.unit);
-        if (u && u.born !== op.born) return;   // that ID was taken in the meantime; the sheet will say so
-        if (!u) units.set(op.unit, unitFromAdd(op));
+        if (born.has(op.born)) return;   // the sheet has it already
+        if (units.has(op.unit)) return;   // that ID was taken in the meantime: the sheet gives it the next free one
+        units.set(op.unit, unitFromAdd(op));
+        born.set(op.born, op.unit);
         logPend(op);
       } else if (op.t === "taborder") {
         if (Array.isArray(op.order)) tabOrder = op.order;
       } else if (op.t === "fuel") {
-        const u = units.get(op.unit); if (!u) return;
+        const id = idOf(op), u = units.get(id); if (!u || (op.born && u.born !== op.born)) return;
         const before = !!(u.fuel && u.fuel.needs);
-        units.set(op.unit, Object.assign({}, u, { fuel: { needs: op.needs, at: op.at, by: S.me.name } }));
-        if (!S.me.isOwner) pend.push(crewPending(op, op.unit, op.unitName || nameOf(u), "Fuel", before ? "Yes" : "No", op.needs ? "Yes" : "No", "fuel"));
+        units.set(id, Object.assign({}, u, { fuel: { needs: op.needs, at: op.at, by: S.me.name } }));
+        if (!S.me.isOwner) pend.push(crewPending(op, id, op.unitName || nameOf(u), "Fuel", before ? "Yes" : "No", op.needs ? "Yes" : "No", "fuel"));
       } else if (op.t === "prob") {
-        problems.unshift({ id: op.pid, at: op.at, by: S.me.name, unit: op.unit, unitName: op.unitName, text: op.text, status: "open", pending: true });
-        if (!S.me.isOwner) pend.push(crewPending(op, op.unit, op.unitName, "Problem", "", op.text, "prob:" + op.pid));
+        const id = idOf(op);
+        problems.unshift({ id: op.pid, at: op.at, by: S.me.name, unit: id, unitName: op.unitName, text: op.text, status: "open", pending: true });
+        if (!S.me.isOwner) pend.push(crewPending(op, id, op.unitName, "Problem", "", op.text, "prob:" + op.pid));
       } else if (op.t === "fix") {
         const pr = problems.find(p => p.id === op.pid);
         problems = problems.map(p => (p.id === op.pid ? Object.assign({}, p, { status: "fixed", fixedAt: op.at, fixedBy: S.me.name }) : p));
@@ -189,6 +199,30 @@
     }
     const pseen = new Set();
     problems = problems.filter(p => (pseen.has(p.id) ? false : (pseen.add(p.id), true)));
+    // A unit a coworker added waits for approval: until its New unit line is approved, only they and the owner
+    // see it (the sheet sends it to no one else). Declined, it's off the app.
+    changes.forEach(c => {
+      const u = c.key === "newunit" && units.get(c.unit);
+      if (!u || !u.pending) return;
+      const st = changeState(c);
+      if (st === "declined") units.delete(c.unit);
+      else if (st === "approved" || st === "synced") units.set(c.unit, Object.assign({}, u, { pending: false }));
+    });
+    // A unit this phone added that went in under the next free ID (another phone got that one first): stay on it.
+    const follow = id => {
+      const was = id && S.units.get(id);
+      if (!was || !was.born) return id;
+      const to = born.get(was.born);
+      if (to && to !== id) {
+        const msg = `Another phone just used ${id}, so ${nameOf(units.get(to) || was)} is ${to}.`;
+        setTimeout(() => toast(msg), 0);   // after the sync's own "all synced"
+        return to;
+      }
+      const now = units.get(id);
+      return now && now.born !== was.born ? null : id;
+    };
+    if (S.openId) S.openId = follow(S.openId);
+    if (S.quick) { const q = follow(S.quick.id); S.quick = q ? Object.assign({}, S.quick, { id: q }) : null; }
     S.units = units; S.changes = changes; S.problems = problems; S.tabOrder = tabOrder;
     S.unitsLoaded = S.changesLoaded = S.problemsLoaded = D.loaded;
     if (S.openId && !S.units.has(S.openId)) S.openId = null;
@@ -852,6 +886,7 @@
   }
   function renderFleet() {
     const body = $("#fleetBody");
+    $("#addMachine").hidden = !S.unitsLoaded || S.readOnly;   // anyone can add one; a coworker's waits for approval
     if (!S.unitsLoaded) { body.innerHTML = stateBlock("loading"); return; }
     if (!S.units.size) { body.innerHTML = noticeCards() + stateBlock("empty"); $("#summary").innerHTML = ""; $("#whoChips").innerHTML = ""; return; }
     const t = today();
@@ -914,7 +949,7 @@
 
   // At the bottom of one kind's tab (never under All or Me): a small way to add another one of them.
   function addRow() {
-    if (S.cat === "all" || S.cat === "me" || !S.me.isOwner || S.readOnly || C.NO_TAB.has(S.cat)) return "";
+    if (S.cat === "all" || S.cat === "me" || S.readOnly || C.NO_TAB.has(S.cat)) return "";
     return `<div class="add-row"><button type="button" class="add-unit" data-action="add-unit">+ Add a ${esc(C.oneOf(S.cat))}</button></div>`;
   }
 
@@ -1141,7 +1176,7 @@
   function quickFuel() {
     const u = S.quick && S.units.get(S.quick.id); if (!u || !canWrite()) return;
     const on = !needsFuel(u);
-    queueOp({ t: "fuel", unit: u.id, needs: on });
+    queueOp(withBorn(u, { t: "fuel", unit: u.id, needs: on }));
     quickSaved((on ? `Flagged ${nameOf(u)} as needing fuel.` : `Marked ${nameOf(u)} as fueled.`) + crewNote() + offlineNote());
   }
   function quickLoc(form) {
@@ -1348,7 +1383,8 @@
     }
     if (v.loc && !shop) bits.push(v.loc);
     const insp = C.applies(u, C.FIELDS.insp.rule) ? C.inspStatus(u, today()) : null;
-    const tags = (insp && insp.st !== "ok" ? `<span class="tag insp-${insp.st}">${insp.now ? "Inspection due" : insp.st === "over" ? "Inspection expired" : "Inspection soon"}</span>` : "") +
+    const tags = (u.pending ? `<span class="tag new">${S.me.isOwner ? "New from " + esc(firstName(u.by) || "the crew") : "Waiting for approval"}</span>` : "") +
+      (insp && insp.st !== "ok" ? `<span class="tag insp-${insp.st}">${insp.now ? "Inspection due" : insp.st === "over" ? "Inspection expired" : "Inspection soon"}</span>` : "") +
       (probs ? `<span class="tag prob">${probs === 1 ? "Problem" : probs + " problems"}</span>` : "") + (shop ? `<span class="tag shop">At shop</span>` : "");
     const cur = C.num(v.cur);
     const hrs = C.usesMeter(u) && cur !== null ? C.fmtNum(cur) + " " + C.unitWord(u) : "";
@@ -1444,8 +1480,8 @@
     const more = D.changesTotal > D.changes.length ? D.changesTotal - D.changes.length : 0;
     const nAp = owner ? all.filter(c => c.state === "approved" && isMasterChange(c)).length : 0;
     let html = `<div class="card card-pad intro">
-      ${owner ? `<p>Every change to a unit's details shows up here first, and so do fuel flags and problems from the crew. <b>Approve</b> the ones you want, or <b>decline</b> one that was a mistake. Approved details wait on the <button class="link" type="button" data-tab="approved">Approved</button> tab until you send them to the master sheet.</p>`
-        : `<p>Your changes, fuel flags and problem reports show up here. Each one waits for approval, and you can see here when it's approved or declined.</p>`}
+      ${owner ? `<p>Every change to a unit's details shows up here first, and so do new machines, fuel flags and problems from the crew. <b>Approve</b> the ones you want, or <b>decline</b> one that was a mistake. Approved details wait on the <button class="link" type="button" data-tab="approved">Approved</button> tab until you send them to the master sheet.</p>`
+        : `<p>Your changes, machines you add, fuel flags and problem reports show up here. Each one waits for approval, and you can see here when it's approved or declined.</p>`}
       ${owner && n("waiting") ? `<div class="row-actions"><button class="btn primary" data-action="approve-all">Approve all waiting (${n("waiting")})</button></div>` : ""}
     </div>
     <div class="chips" role="group" aria-label="Show changes: waiting, declined, sent to the master sheet, or all">${filters.map(([k, l]) =>
@@ -1470,7 +1506,7 @@
           <div class="ch-top"><span class="plate">${esc(c.unit)}</span><span class="t">${esc(unitName)}</span><span class="pill ${STATE_PILL[c.state]}">${STATE_LABEL[c.state]}</span></div>
           <div class="ch-field">${esc(fieldName(c))}</div>
           <div class="ch-diff">${changeDiff(c, fmtChangeVal(c, c.from), fmtChangeVal(c, c.to))}</div>
-          <div class="ch-meta">${esc(whenText(c.at))} · ${esc(whoName(c.by))}${pendingNote(c)}${c.state === "stale" ? " · a newer value was saved first, so this one wasn't used" : ""}${c.state === "declined" ? " · won't go to the master sheet" : ""}</div>
+          <div class="ch-meta">${esc(whenText(c.at))} · ${esc(whoName(c.by))}${pendingNote(c)}${c.state === "stale" ? " · a newer value was saved first, so this one wasn't used" : ""}${c.state === "declined" ? (c.key === "newunit" && (crewNewUnit(c) || !S.me.isOwner) ? " · it's off the app" : " · won't go to the master sheet") : ""}</div>
           ${acts ? `<div class="row-actions">${acts}</div>` : ""}
         </div>`;
       }).join("")}</section>`;
@@ -1834,6 +1870,7 @@
         ${meta ? `<p class="d-meta">${esc(meta)}</p>` : ""}
         ${fuel ? `<p class="fuel-note">Needs fuel · flagged ${esc(whenText(u.fuel.at))} · ${esc(whoName(u.fuel.by))}</p>` : ""}
       </div></div>`;
+    html += newUnitCard(u);
     if (C.usesMeter(u)) html += meterCard(u);
     if (C.applies(u, C.FIELDS.loc.rule)) html += locationCard(u);
     html += attWithCard(u);
@@ -1874,13 +1911,17 @@
 
   function latestChange(unitId, key) { return S.changes.find(c => c.unit === unitId && c.key === key && changeState(c) !== "stale") || null; }
 
-  // ---------------------------------------------------------------- adding a unit (the + Add at the bottom of a tab)
-  // The form asks only what identifies it; everything else goes in on its own page after. It gets the next ID for
-  // that kind (TB-04 after TB-03), and starts with the same service intervals as one like it already in the app.
+  // ---------------------------------------------------------------- adding a unit
+  // Add machine (above the search) or the small + Add at the bottom of a tab. The form asks only what identifies
+  // it; everything else goes in on its own page after. It gets the next ID for that kind (TB-04 after TB-03), and
+  // starts with the same service intervals as one like it already in the app. One a coworker adds shows on their
+  // phone (and the owner's) right away, and for the rest of the crew once it's approved.
   function nextId(code) {
-    const pre = C.ID_PREFIX[code];
+    const pre = C.ID_PREFIX[code], re = new RegExp("^" + pre + "-(\\d+)$");
     let max = 0;
-    S.units.forEach(u => { const m = String(u.id).match(new RegExp("^" + pre + "-(\\d+)$")); if (m) max = Math.max(max, Number(m[1])); });
+    const see = id => { const m = String(id).match(re); if (m) max = Math.max(max, Number(m[1])); };
+    S.units.forEach(u => see(u.id));
+    (D.taken || []).forEach(see);   // IDs this phone can't see yet (a coworker's new one waiting for approval)
     return pre + "-" + String(max + 1).padStart(2, "0");
   }
   // One like it: the same tab and type if there is one, otherwise the same kind of equipment.
@@ -1888,20 +1929,81 @@
     const code = C.codeOfGroup(k), list = unitsArr().filter(u => u.code === code);
     return list.find(u => C.groupOf(u) === k && (u.kind || "") === kind) || list.find(u => (u.kind || "") === kind) || list[0] || null;
   }
-  function addForm(k) {
-    const code = C.codeOfGroup(k), kinds = C.KINDS[code], one = C.oneOf(k), id = nextId(code);
-    const tpl = templateFor(k, kinds ? kinds[0][0] : "");
+
+  // What kind of equipment a name sounds like ("330 excavator", "Cat D5 dozer", "tri-axle"), so the form can pick it
+  // as you type. With no word to go on, a model number that matches one already on the list (330, MT100) goes with
+  // that one's kind. Always shown, so a wrong guess is one tap to fix.
+  const GUESS = [
+    [/dump trailer/, "TR", "dumptrl"], [/low ?boy/, "TR", "lowboy"], [/flow ?boy/, "TR", "flowboy"],
+    [/trailer|step deck|goose ?neck|tag ?along|tilt deck/, "TR", ""],
+    [/light tower/, "TB", "light"], [/compressor/, "TB", "comp"], [/mixer/, "TB", "mixer"], [/tow behind|generator|welder|chipper/, "TB", ""],
+    [/plate|jumping jack|\bjj\b|rammer|tamper|wacker/, "C"],
+    [/\bsaw\b|chain ?saw|cut off|broom|blower|trimmer|weed ?eater|\bk ?[79]70\b/, "T"],
+    [/mini (track )?loader|\bmt ?\d{2,3}\b/, "M"],
+    [/skid|track loader|\bctl\b|\bsvl ?\d*\b/, "S"],
+    [/\bmini\b/, "ex-mini"],
+    [/zero|\bzts\b|tail swing|short swing|\becr ?\d/, "ex-zero"],
+    [/dozer|\bd\d{1,2}[a-z]{0,3}\b/, "D"],
+    [/haul|articulated|rock truck|\badt\b|off road truck/, "H"],
+    [/roller|compactor|\bdrum\b/, "R"],
+    [/\blift\b|man ?lift|boom lift|telehandler|\blull\b|forklift|scissor/, "LF"],
+    [/excavat|\bhoe\b|track ?hoe|digger|long reach|\bexc?\b/, "ex"],
+    [/loader|\bit ?\d{2}\b/, "P"],
+    [/tractor|\bsemi\b|\bhorse\b|day cab|sleeper/, "TC"],
+    [/dump|tri ?axle|tandem|quad axle|western star|kenworth|\bmack\b|freightliner|peterbilt/, "DT"],
+    [/pick ?up|service truck|\bf ?\d{3}\b|silverado|sierra|\bram\b|rack body|flat ?bed|\btruck\b|chevy|dodge|\bgmc\b/, "PU"]
+  ];
+  // Model numbers in a name ("330", "d6k", "mt100"), leaving out years and single digits ("#2").
+  const numsOf = s => (String(s || "").toLowerCase().replace(/[-_/.]+/g, " ").match(/[a-z]*\d+[a-z]*/g) || [])
+    .filter(t => !/^(19|20)\d{2}$/.test(t) && !/^\d$/.test(t));
+  const unitNums = u => numsOf(nameOf(u) + " " + ((u.v || {}).model || ""));
+  function guessGroup(text) {
+    const t = " " + String(text || "").toLowerCase().replace(/[-_/,.()#'’]+/g, " ").replace(/\s+/g, " ") + " ";
+    const nums = numsOf(text);
+    const like = test => { const u = nums.length ? unitsArr().find(x => test(x) && unitNums(x).some(n => nums.includes(n))) : null; return u || null; };
+    for (const [re, k, kind] of GUESS) {
+      if (!re.test(t)) continue;
+      if (k !== "ex") return { k, kind: kind === undefined ? null : kind };
+      const twin = like(u => u.code === "E");   // an excavator with the same number is the same kind (330, 325)
+      if (twin) return { k: C.groupOf(twin), kind: null };
+      if (nums.some(n => /^(30\d|310|e\d{2}|kx\d*|u\d{2}|\d{2}g|tb2\d{2})$/.test(n))) return { k: "ex-mini", kind: null };
+      return { k: /\b(cr|sr)\b/.test(t) ? "ex-zero" : "ex-conv", kind: null };
+    }
+    const twin = like(() => true);
+    return twin ? { k: C.groupOf(twin), kind: C.KINDS[twin.code] ? twin.kind || "" : null } : null;
+  }
+
+  const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+  const kindSelect = (k, sel) => {
+    const kinds = k && C.KINDS[C.codeOfGroup(k)];
+    return kinds ? `<label for="add-kind">Type<select id="add-kind" name="kind">${kinds.map(([v, l]) => `<option value="${esc(v)}"${v === sel ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>` : "";
+  };
+  function addHint(k, kind) {
+    const crew = S.me.isOwner ? "" : " The rest of the crew sees it once it's approved.";
+    if (!k) return "Pick the kind of equipment and it gets the next number for that kind. Hours, location, filters and the rest go in on its page after you add it." + crew;
+    const id = nextId(C.codeOfGroup(k)), tpl = templateFor(k, kind || "");
+    return `It gets the next number, ${id}${tpl ? `, and starts with the same service intervals as ${nameOf(tpl)}` : ""}. Hours, location, filters and the rest go in on its page after you add it.` + crew;
+  }
+  // From Add machine, the kind starts as the tab you're on (if it's one kind) and follows what you type until you pick
+  // one yourself. From a tab's + Add, it's that tab's kind.
+  function addForm(origin) {
+    const top = origin === "top";
+    const k = top ? (C.GROUP_ORDER.includes(S.cat) ? S.cat : "") : origin;
+    const kinds = k && C.KINDS[C.codeOfGroup(k)];
     const people = C.LISTS.people || [];
+    const opts = (k ? "" : `<option value="" selected>Pick one</option>`) + groupOrder().map(g => `<option value="${esc(g)}"${g === k ? " selected" : ""}>${esc(cap(C.oneOf(g)))}</option>`).join("");
     return `<div class="d-head">
-        <button class="btn quiet back" data-action="add-cancel">← ${esc(C.groupName(k))}</button>
+        <button class="btn quiet back" data-action="add-cancel">← ${esc(top ? "All units" : C.groupName(k))}</button>
         <div class="d-title">
-          <div class="line"><span class="plate lg">${esc(id)}</span><span class="muted">${esc(C.groupName(k))}</span></div>
-          <div class="name-line"><h2>New ${esc(one)}</h2></div>
+          <div class="line"><span class="plate lg" id="add-id"${k ? "" : " hidden"}>${k ? esc(nextId(C.codeOfGroup(k))) : ""}</span><span class="muted" id="add-cat">${k ? esc(C.groupName(k)) : ""}</span></div>
+          <div class="name-line"><h2 id="add-title">New ${esc(k ? C.oneOf(k) : "machine")}</h2></div>
         </div></div>
       <section class="card card-pad add-card">
-        <form class="editor" data-form="add" autocomplete="off">
-          <label for="add-name">Name<input id="add-name" name="name" type="text" maxlength="120" placeholder="What everyone calls it"></label>
-          ${kinds ? `<label for="add-kind">Type<select id="add-kind" name="kind">${kinds.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("")}</select></label>` : ""}
+        <form class="editor" data-form="add" autocomplete="off" data-start="${esc(k)}" data-picked="${top ? "" : "1"}">
+          <label for="add-name">Name<input id="add-name" name="name" type="text" maxlength="120" placeholder="${top ? "Like 330 excavator" : "What everyone calls it"}"></label>
+          <div class="add-like" id="add-like" hidden></div>
+          <label for="add-group">Kind of equipment<select id="add-group" name="group">${opts}</select></label>
+          <div class="kind-wrap" id="add-kind-wrap" data-k="${esc(k)}">${kindSelect(k, kinds ? kinds[0][0] : "")}</div>
           <div class="inputs">
             <label for="add-make">Make<input id="add-make" name="make" type="text" maxlength="60"></label>
             <label for="add-model">Model<input id="add-model" name="model" type="text" maxlength="60"></label>
@@ -1909,17 +2011,58 @@
           </div>
           <label for="add-owner">Assigned to<input id="add-owner" name="owner" type="text" list="dl-add-owner" autocomplete="off"><datalist id="dl-add-owner">${people.map(p => `<option value="${esc(p)}"></option>`).join("")}</datalist></label>
           <label for="add-serial">Serial # / PIN / VIN<input id="add-serial" name="serial" type="text" autocapitalize="characters" spellcheck="false" maxlength="60"></label>
-          <p class="hint">It gets the next number, ${esc(id)}${tpl ? `, and starts with the same service intervals as ${esc(nameOf(tpl))}` : ""}. Hours, location, filters and the rest go in on its page after you add it.</p>
+          <p class="hint" id="add-hint">${esc(addHint(k, kinds ? kinds[0][0] : ""))}</p>
           <p class="warn" id="addWarn" hidden></p>
-          <div class="row-actions"><button class="btn primary" type="submit">Add ${esc(one)}</button><button class="btn" type="button" data-action="add-cancel">Cancel</button></div>
+          <div class="row-actions"><button class="btn primary" type="submit">${esc(top ? "Add machine" : "Add " + C.oneOf(k))}</button><button class="btn" type="button" data-action="add-cancel">Cancel</button></div>
         </form>
       </section>`;
   }
-  function openAdd() {
-    if (S.cat === "all" || S.cat === "me" || !S.me.isOwner || S.readOnly || C.NO_TAB.has(S.cat)) return;
-    if (!S.openId) S.listScroll = window.scrollY;
+  // As you type: the kind (until you pick one), its type, the ID it gets, and anything already on the list like it.
+  function addLive(form, from) {
+    const sel = form.elements.group;
+    if (!sel) return;
+    if (from === "group") form.dataset.picked = "1";
+    if (from === "kind") form.dataset.kindPicked = "1";
+    const text = ["name", "make", "model"].map(n => form.elements[n].value).join(" ");
+    const guess = guessGroup(text);
+    if (form.dataset.picked !== "1") {
+      const k = guess ? guess.k : form.dataset.start || "";
+      if (sel.value !== k) sel.value = k;
+    }
+    const k = sel.value;
+    const wrap = $("#add-kind-wrap");
+    const want = guess && guess.k === k && guess.kind !== null ? guess.kind : null;
+    if (wrap.dataset.k !== k) {
+      const kinds = C.KINDS[C.codeOfGroup(k)];
+      wrap.innerHTML = kindSelect(k, want !== null ? want : kinds ? kinds[0][0] : "");
+      wrap.dataset.k = k;
+      form.dataset.kindPicked = "";
+    } else if (form.elements.kind && form.dataset.kindPicked !== "1" && want !== null && form.elements.kind.value !== want) form.elements.kind.value = want;
+    const kind = form.elements.kind ? form.elements.kind.value : "";
+    const plate = $("#add-id");
+    plate.hidden = !k;
+    plate.textContent = k ? nextId(C.codeOfGroup(k)) : "";
+    $("#add-cat").textContent = k ? C.groupName(k) : "";
+    $("#add-title").textContent = "New " + (k ? C.oneOf(k) : "machine");
+    $("#add-hint").textContent = addHint(k, kind);
+    // Already on the list? Ones of that kind with the same model number, so nobody adds the same machine twice.
+    const nums = numsOf(form.elements.name.value + " " + form.elements.model.value);
+    const code = k ? C.codeOfGroup(k) : "";
+    const same = nums.length ? unitsArr().filter(u => (!code || u.code === code) && unitNums(u).some(n => nums.includes(n))).slice(0, 3) : [];
+    const like = $("#add-like");
+    const html = same.length ? `<p>Already on the list? Tap it to open it instead.</p>` + same.map(u => `<button type="button" class="like" data-open="${esc(u.id)}"><span class="plate">${esc(u.id)}</span><span>${esc(nameOf(u))}</span></button>`).join("") : "";
+    if (like.innerHTML !== html) like.innerHTML = html;
+    like.hidden = !same.length;
+    const w = $("#addWarn"); if (w && from !== "kind") { w.hidden = true; delete form.dataset.dup; }
+  }
+  function openAdd(top) {
+    if (S.readOnly) return;
+    if (!top && (S.cat === "all" || S.cat === "me" || C.NO_TAB.has(S.cat))) return;
+    const want = top ? "top" : S.cat;
+    if (S.adding === want && !S.openId) { const i = $("#add-name"); if (i) i.focus(); return; }
+    if (!S.openId && !S.adding) S.listScroll = window.scrollY;
     S.editing = null; S.attDraft = null; S.quick = null;
-    S.adding = S.cat; S.openId = null;
+    S.adding = want; S.openId = null;
     navPush();
     render();
     window.scrollTo(0, 0);
@@ -1936,12 +2079,13 @@
     rootWatch();
   }
   function saveAdd(form) {
-    const k = S.adding;
-    if (!k || !S.me.isOwner || !canWrite()) return;
-    const code = C.codeOfGroup(k);
+    if (!S.adding || !canWrite()) return;
     const val = n => (form.elements[n] ? form.elements[n].value.trim().replace(/\s+/g, " ") : "");
     const name = val("name");
     if (!name) return showWarn(form, "addWarn", "Give it a name, the one everyone calls it.");
+    const k = val("group");
+    if (!C.GROUP_ORDER.includes(k)) return showWarn(form, "addWarn", "Pick the kind of equipment it is.");
+    const code = C.codeOfGroup(k);
     const dup = [...S.units.values()].find(u => nameOf(u).toLowerCase() === name.toLowerCase());
     if (dup && form.dataset.dup !== name.toLowerCase()) {
       form.dataset.dup = name.toLowerCase();
@@ -1983,7 +2127,33 @@
     try { if (NAV.on && history.state && history.state.ml && history.state.add) history.replaceState(screenNow(), ""); } catch (e) { /* fine */ }
     render();
     window.scrollTo(0, 0);
-    toast(`Added ${id} ${name}. Fill in the rest here. It's on your Changes list for the master sheet.` + offlineNote());
+    toast(`Added ${id} ${name}. Fill in the rest here. ` + (S.me.isOwner ? "It's on your Changes list for the master sheet." : "The rest of the crew sees it once it's approved.") + offlineNote());
+  }
+
+  // A unit a coworker added, waiting for approval. The owner approves or declines it right on its page: all of it
+  // at once (the unit and the details filled in so far).
+  function newUnitCard(u) {
+    if (!u.pending) return "";
+    const one = C.oneOf(C.groupOf(u));
+    if (!S.me.isOwner) return `<section class="card card-pad new-card"><p><b>Waiting for approval.</b> The rest of the crew sees this ${esc(one)} once it's approved. Fill in its hours, location and anything else below in the meantime.</p></section>`;
+    return `<section class="card card-pad new-card"><p><b>${esc(firstName(u.by) || "Someone on the crew")} added this ${esc(one)}.</b> The rest of the crew sees it once you approve it.</p>
+      ${S.readOnly ? "" : `<div class="row-actions"><button class="btn primary" data-action="nu-approve">Approve</button><button class="btn decline" data-action="nu-decline">Decline</button></div>`}</section>`;
+  }
+  const unitLines = (id, states) => S.changes.filter(c => c.unit === id && states.includes(changeState(c))).map(c => c.id);
+  function approveNewUnit() {
+    const u = S.units.get(S.openId);
+    if (!u || !u.pending || !S.me.isOwner || !canWrite()) return;
+    if (!setApproval(unitLines(u.id, ["waiting"]), true)) return;
+    toast(`Approved. Everyone sees ${u.id} ${nameOf(u)} now. Its details are on the Approved tab for the master sheet.` + offlineNote());
+  }
+  // Declined, a unit a coworker added comes off the app, along with everything filled in for it.
+  function declineNewUnit(u) {
+    if (!u || !S.me.isOwner || !canWrite()) return;
+    const ids = unitLines(u.id, ["waiting", "approved"]);
+    if (!ids.length) return;
+    queueOp({ t: "approve", cids: ids, val: "Declined" });
+    render();
+    toast(`Declined. ${u.id} ${nameOf(u)} is off the app.` + offlineNote());
   }
 
   function locationPicks(u) {
@@ -2410,7 +2580,7 @@
     const u = S.units.get(S.openId); if (!u || !canWrite()) return;
     const text = form.elements.text.value.trim();
     if (!text) return showWarn(form, "probWarn", "Describe the problem so the next person knows what to look at.");
-    queueOp({ t: "prob", pid: newId("P"), unit: u.id, unitName: nameOf(u), text });
+    queueOp(withBorn(u, { t: "prob", pid: newId("P"), unit: u.id, unitName: nameOf(u), text }));
     endEdit();
     render();
     toast(`Problem reported. ${nameOf(u)} shows orange in the list until it's marked fixed.` + crewNote() + offlineNote());
@@ -2426,7 +2596,7 @@
   function toggleFuel() {
     const u = S.units.get(S.openId); if (!u || !canWrite()) return;
     const on = !needsFuel(u);
-    queueOp({ t: "fuel", unit: u.id, needs: on });
+    queueOp(withBorn(u, { t: "fuel", unit: u.id, needs: on }));
     render();
     toast((on ? `Flagged ${nameOf(u)} as needing fuel.` : `Marked ${nameOf(u)} as fueled.`) + crewNote() + offlineNote());
   }
@@ -2494,7 +2664,7 @@
       const newer = S.changes.some(x => x.id !== c.id && x.unit === c.unit && x.key === "fuel" && String(x.at) > String(c.at) && !["stale", "declined"].includes(changeState(x)));
       const want = (undo ? c.from : c.to) === "Yes";
       if (!u || newer || needsFuel(u) !== want) return null;
-      return { t: "fuel", unit: u.id, needs: !want };
+      return withBorn(u, { t: "fuel", unit: u.id, needs: !want });
     }
     const pid = key.slice(key.indexOf(":") + 1);
     const p = S.problems.find(x => x.id === pid);
@@ -2503,9 +2673,12 @@
     if (key.startsWith("fix:")) return undo ? (p.status === "open" ? { t: "fix", pid } : null) : (p.status === "fixed" ? { t: "probx", pid, val: "Open" } : null);
     return null;
   }
+  // The New unit line of a unit a coworker added: declining it takes the whole unit off the app.
+  const crewNewUnit = c => c.key === "newunit" && !!c.by && c.by !== S.me.name;
   function declineChange(id) {
     const c = findChange(id);
     if (!S.me.isOwner || !c || !["waiting", "approved"].includes(changeState(c))) return;
+    if (crewNewUnit(c)) return declineNewUnit(S.units.get(c.unit) || { id: c.unit, v: { name: c.unitName || c.to } });
     const crewItem = !isMasterChange(c);
     const back = crewItem ? crewUndo(c, false) : fieldBack(c, c.from, c.to);
     queueOp({ t: "approve", cids: [id], val: "Declined" });
@@ -2523,6 +2696,12 @@
   function undoDecline(id) {
     const c = findChange(id);
     if (!S.me.isOwner || !c || changeState(c) !== "declined") return;
+    if (crewNewUnit(c)) {   // the unit comes back, waiting again, with what was filled in for it
+      queueOp({ t: "approve", cids: [id].concat(unitLines(c.unit, ["declined"]).filter(x => x !== id)), val: "" });
+      render();
+      toast(`Back to waiting for approval. ${[c.unit, c.unitName].filter(Boolean).join(" ")} is back on the app for you and ${firstName(c.by)}.` + offlineNote());
+      return;
+    }
     queueOp({ t: "approve", cids: [id], val: "" });
     const again = isMasterChange(c) ? fieldBack(c, c.to, c.from) : crewUndo(c, true);   // decline had undone it: put it back
     if (again) queueOp(again);
@@ -2663,7 +2842,7 @@
     const tab = TABS.includes(st.tab) && !(st.tab === "approved" && !S.me.isOwner) ? st.tab : "fleet";
     const id = st.openId && S.units.has(st.openId) ? st.openId : null;
     const filter = typeof st.st === "string" && st.st ? st.st : "all";
-    const add = !id && st.add && S.me.isOwner ? st.add : null;
+    const add = !id && st.add ? st.add : null;
     const qa = st.qa && S.units.has(st.qa) ? st.qa : null;
     const moved = tab !== S.tab || id !== (S.openId || null) || filter !== S.st || add !== (S.adding || null) || qa !== (S.quick ? S.quick.id : null);
     if (!moved) { if (hadEditor) renderDetail(); rootWatch(); return; }
@@ -2781,8 +2960,11 @@
       if (S.st !== "all") return setSt("all");
       return renderFleet();
     }
-    if (a === "add-unit") return openAdd();
+    if (a === "add-machine") return openAdd(true);
+    if (a === "add-unit") return openAdd(false);
     if (a === "add-cancel") return cancelAdd();
+    if (a === "nu-approve") return approveNewUnit();
+    if (a === "nu-decline") return declineNewUnit(S.units.get(S.openId));
     if (a === "qa-close") return closeQuick();
     if (a === "qa-loc") return quickMode("loc");
     if (a === "qa-hours") return quickMode("hours");
@@ -2873,6 +3055,7 @@
   document.addEventListener("input", e => {
     const i = e.target;
     if (i.name === "hrs" && i.dataset && i.dataset.for) { hoursDraft(i.dataset.for, C.num(i.value), true); return; }
+    if (i.form && i.form.dataset && i.form.dataset.form === "add") { addLive(i.form, i.name); return; }
     if (!i.classList || !i.classList.contains("code-input")) return;
     const raw = normKey(i.value).slice(0, 12);
     const pretty = raw.replace(/(.{4})(?=.)/g, "$1-");
@@ -2897,6 +3080,6 @@
   $("#q").addEventListener("input", e => { S.q = e.target.value; S.quick = null; renderFleet(); });
 
   // for the local test harness only
-  window.__ML = { S, D, L, NAV, sync, reloadFromDb, approvedGroups, changeState };
+  window.__ML = { S, D, L, NAV, sync, reloadFromDb, approvedGroups, changeState, guessGroup };
   init();
 })();
