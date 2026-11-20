@@ -121,6 +121,7 @@
     C.configure(c);
     S.me.name = c.name || "Me";
     S.me.isOwner = c.role !== "crew";   // a coworker's code: everything they send waits for the owner's approval
+    S.me.limited = !!c.limited;   // a code just for certain machines: it sees only those, and adds none
     const mark = $("#brandMark"), name = $("#brandName");
     if (mark) mark.textContent = c.mark || "ML";
     if (name) name.textContent = c.brand || "Machine List";
@@ -614,7 +615,7 @@
     lsSet("seenAt", Date.now());
     if (!L.pin && why === "setup") openLock("new", true);
     render();
-    toast(why === "keychain" ? "Set up again with the code saved on this phone." : `All set. ${S.units.size} units are saved on this phone.`);
+    toast(why === "keychain" ? "Set up again with the code saved on this phone." : `All set. ${S.units.size} ${S.units.size === 1 ? "unit is" : "units are"} saved on this phone.`);
     schedule(POLL_MS);
     if (why === "setup") setTimeout(() => rememberCode(code), L.open ? 1500 : 300);
     return { ok: true };
@@ -781,7 +782,7 @@
     else if (waiting) text = "Sending " + plural(waiting) + "…";
     else if (off) text = "No signal · all saved on this phone";
     else {
-      text = n + " units";
+      text = n + (n === 1 ? " unit" : " units");
       if (D.lastOk) text += " · synced " + shortTime(D.lastOk);
     }
     line.textContent = text;
@@ -811,6 +812,7 @@
 
   function stateBlock(kind) {
     if (kind === "loading") return `<div class="card empty-state"><h3>Loading equipment</h3><p>${isOffline() ? "No signal right now. It all downloads by itself once there's service." : "Pulling up every machine, truck, trailer and small engine."}</p></div>`;
+    if (S.me.limited) return `<div class="card empty-state"><h3>No machines yet</h3><p>This code isn't set up for any machines right now.</p></div>`;
     return `<div class="card empty-state"><h3>No equipment yet</h3><p>Your sheet doesn't have any units in it. Ask Claude to load the equipment list.</p></div>`;
   }
 
@@ -886,7 +888,7 @@
   }
   function renderFleet() {
     const body = $("#fleetBody");
-    $("#addMachine").hidden = !S.unitsLoaded || S.readOnly;   // anyone can add one; a coworker's waits for approval
+    $("#addMachine").hidden = !S.unitsLoaded || S.readOnly || S.me.limited;   // anyone can add one; a coworker's waits for approval
     if (!S.unitsLoaded) { body.innerHTML = stateBlock("loading"); return; }
     if (!S.units.size) { body.innerHTML = noticeCards() + stateBlock("empty"); $("#summary").innerHTML = ""; $("#whoChips").innerHTML = ""; return; }
     const t = today();
@@ -949,7 +951,7 @@
 
   // At the bottom of one kind's tab (never under All or Me): a small way to add another one of them.
   function addRow() {
-    if (S.cat === "all" || S.cat === "me" || S.readOnly || C.NO_TAB.has(S.cat)) return "";
+    if (S.cat === "all" || S.cat === "me" || S.readOnly || S.me.limited || C.NO_TAB.has(S.cat)) return "";
     return `<div class="add-row"><button type="button" class="add-unit" data-action="add-unit">+ Add a ${esc(C.oneOf(S.cat))}</button></div>`;
   }
 
@@ -1619,7 +1621,7 @@
         <div><dt>Waiting to send</dt><dd class="${waiting ? "wait" : "ok"}">${waiting ? waiting + " update" + (waiting === 1 ? "" : "s") : "Nothing, all sent"}</dd></div>
         <div><dt>Last synced</dt><dd>${D.lastOk ? esc(shortTime(D.lastOk)) : "Not yet"}</dd></div>
         <div><dt>Signal</dt><dd>${D.busy ? "Syncing…" : off ? "None right now" : "Connected"}</dd></div>
-        <div><dt>Saved here</dt><dd>${S.units.size} units · ${S.problems.filter(p => p.status !== "fixed").length} open problems</dd></div>
+        <div><dt>Saved here</dt><dd>${S.units.size} ${S.units.size === 1 ? "unit" : "units"} · ${S.problems.filter(p => p.status !== "fixed").length} open problems</dd></div>
       </dl>
       <div class="row-actions"><button class="btn primary" type="button" data-action="sync-now"${S.keyBad ? " disabled" : ""}>Sync now</button>${D.sheetUrl ? `<a class="btn" href="${esc(D.sheetUrl)}" target="_blank" rel="noopener">Open my sheet</a>` : ""}</div>
       ${standalone() ? "" : `<details class="howto"><summary>Put the app on your home screen</summary>${installSteps()}${S.installEvt ? `<div class="row-actions" style="margin-top:8px"><button class="btn" type="button" data-action="install">Add to home screen</button></div>` : ""}</details>`}
@@ -2056,7 +2058,7 @@
     const w = $("#addWarn"); if (w && from !== "kind") { w.hidden = true; delete form.dataset.dup; }
   }
   function openAdd(top) {
-    if (S.readOnly) return;
+    if (S.readOnly || S.me.limited) return;
     if (!top && (S.cat === "all" || S.cat === "me" || C.NO_TAB.has(S.cat))) return;
     const want = top ? "top" : S.cat;
     if (S.adding === want && !S.openId) { const i = $("#add-name"); if (i) i.focus(); return; }
