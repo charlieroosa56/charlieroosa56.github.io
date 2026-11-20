@@ -98,7 +98,9 @@
     HUT: inCode("DT", "TC"),
     ENG_NOT_TWO: and(u => u.g !== "TRL", not(isTwo)),
     BELT_SVC: inKind("demo", "chain", "broom", "plate", "plate_rev"),
-    ANNUAL: inCode("LF")   // lifts only; trucks, trailers and tow-behinds use the State inspection card instead
+    ANNUAL: inCode("LF"),   // lifts only; trucks, trailers and tow-behinds use the State inspection card instead
+    TIRE_SVC: inCode("DT"),   // tires as a service, on dump trucks
+    REG_CARD: inCode("DT", "PU")   // a Registration box under State inspection
   };
 
   // Filled in from the sheet's Settings tab: the people list, and how master-sheet initials show.
@@ -312,6 +314,7 @@
     ["plug", "SPARK PLUG", "Spark plug", "SPARK", "Small engines: about once a year or 100 hrs."],
     ["hydf", "HYDRAULIC FILTERS", "Hydraulic filters", "HYD_FILT", "Often 500–1,000 hrs. Many machines want an early first change when new."],
     ["hydo", "HYDRAULIC OIL", "Hydraulic oil", "HYD_FILT", "Often 2,000–4,000 hrs, or go by oil-sample results."],
+    ["tires", "TIRES", "Tires", "TIRE_SVC", "Check pressure and tread every week. Rotate or replace as the tire shop recommends."],
     ["grease", "GREASE", "Grease", "NOT_TWO", "Pins and bushings every 10 hrs or daily. Trailers and trucks monthly or every oil change."],
     ["cool", "COOLANT", "Coolant", "BIG", "Extended-life coolant often 3,000–6,000 hrs or 2–3 years. Test it yearly."],
     ["gear", "GEAR OILS (Final Drive · Swing · Axles · Trans)", "Gear oils", "HEQ_TRK", "Often 1,000–2,000 hrs. Check levels much more often."],

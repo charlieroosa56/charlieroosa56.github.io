@@ -1877,6 +1877,7 @@
     if (C.applies(u, C.FIELDS.loc.rule)) html += locationCard(u);
     html += attWithCard(u);
     html += inspCard(u);
+    html += regCard(u);
     html += problemsCard(u);
     html += serviceCard(u, t);
     if (C.applies(u, "ATT")) html += attCard(u);
@@ -2260,6 +2261,34 @@
     return html + `</section>`;
   }
 
+  // Registration on dump trucks and pickups, right under the State inspection: the date it runs out, yellow for
+  // the 30 days before and red once it's past, like the other paperwork dates (and on the Due tab with them).
+  function regCard(u) {
+    if (!C.applies(u, "REG_CARD")) return "";
+    const val = (u.v || {}).reg, d = C.parseDate(val);
+    const e = d ? C.expiryStatus(val, today()) : null;
+    const last = latestChange(u.id, "reg");
+    const editing = S.editing && S.editing.type === "reg";
+    let html = `<section class="card card-pad loc-card insp-card reg-card${e && e.st !== "ok" ? " " + e.st : ""}">
+      <div class="meter-top"><div class="eyebrow">Registration</div>
+        ${!S.readOnly && !editing ? `<button class="btn primary" data-action="reg">Update registration</button>` : ""}</div>`;
+    if (e) {
+      html += `<div class="loc-now">${e.st === "over" ? "Expired" : "Expires"} ${esc(C.usDate(d))}<span class="pill ${e.st}">${esc(e.label)}</span></div>
+        ${last ? `<div class="meter-sub">Updated ${esc(whenText(last.at))} · ${esc(whoName(last.by))}</div>` : ""}`;
+    } else if (!editing) {
+      html += `<p class="attw-none muted">No registration date entered yet.</p>`;
+    }
+    if (editing) {
+      html += `<form class="editor" data-form="reg">
+        <div class="inputs one"><label for="ed-reg">Expires on<input id="ed-reg" name="reg" type="date" value="${esc(d ? C.isoDate(d) : "")}"></label></div>
+        <p class="hint">The date on the registration. This box turns yellow 30 days before it runs out and red once it has.</p>
+        <p class="warn" id="regWarn" hidden></p>
+        <div class="row-actions"><button class="btn primary" type="submit">Save</button><button class="btn" type="button" data-action="cancel">Cancel</button></div>
+      </form>`;
+    }
+    return html + `</section>`;
+  }
+
   function problemItem(p, open) {
     // A coworker's problem report (or their Mark fixed) waits for approval: say so, and let the owner decide right here.
     const rep = S.changes.find(c => c.key === (open ? "prob:" : "fix:") + p.id);
@@ -2294,17 +2323,25 @@
     return html + `</section>`;
   }
 
+  // Serviced (above the list) puts an empty box on each item: check off what was done, tap Serviced again, and
+  // they all get that day and reading at once.
   function serviceCard(u, t) {
     const list = C.servicesFor(u);
     const meter = C.usesMeter(u);
     const word = C.unitWord(u);
-    return `<section class="card card-pad"><div class="card-h"><h3>Service</h3><span class="muted">${list.length} items</span></div>
-      <div class="svc-list">${list.map(s => {
+    const batch = S.editing && S.editing.type === "svcbatch" ? S.editing : null;
+    const head = `<div class="card-h"><h3>Service</h3>${S.readOnly ? `<span class="muted">${list.length} items</span>`
+      : batch ? `<button class="btn small" type="button" data-action="cancel">Cancel</button>`
+      : `<button class="btn primary" type="button" data-action="svc-batch">Serviced</button>`}</div>`;
+    const rows = list.map(s => {
         const r = C.serviceStatus(u, s.key, t);
         const d = (u.svc || {})[s.key] || {};
         const ld = C.parseDate(d.ld);
         const last = ld ? `Last done <b>${C.usDate(ld)}</b>${meter && C.num(d.lh) !== null ? ` at <b>${C.fmtNum(C.num(d.lh))} ${word}</b>` : ""}` : "No service logged yet";
         const every = [meter && C.num(d.ih) !== null ? C.fmtNum(C.num(d.ih)) + " " + word : "", C.num(d.im) !== null ? C.num(d.im) + " months" : ""].filter(Boolean).join(" or ");
+        if (batch) return `<label class="svc svc-pick"><input type="checkbox" name="svc" value="${s.key}"${batch.checked.includes(s.key) ? " checked" : ""}>
+          <span class="svc-body"><span class="svc-top"><span class="svc-name">${esc(s.short)}</span><span class="pill ${r.st}">${esc(r.label)}</span></span>
+          <span class="svc-line">${last}</span></span></label>`;
         const editing = S.editing && S.editing.type === "svc" && S.editing.svc === s.key;
         return `<div class="svc">
           <div class="svc-top"><span class="svc-name">${esc(s.short)}</span><span class="pill ${r.st}">${esc(r.label)}</span></div>
@@ -2313,8 +2350,23 @@
           ${!S.readOnly && !editing ? `<div class="row-actions"><button class="btn small" data-action="svc-done" data-svc="${s.key}">Done today</button><button class="btn small" data-action="svc-edit" data-svc="${s.key}">Edit</button></div>` : ""}
           ${editing ? svcEditor(u, s, d) : ""}
         </div>`;
-      }).join("")}</div></section>`;
+      }).join("");
+    if (!batch) return `<section class="card card-pad svc-card">${head}<div class="svc-list">${rows}</div></section>`;
+    const n = batch.checked.length;
+    return `<section class="card card-pad svc-card batch"><form class="svc-form" data-form="svcbatch" novalidate>${head}
+      <p class="svc-ask">Check off what you did, then tap Serviced.</p>
+      <div class="svc-list">${rows}</div>
+      <div class="svc-bar editor">
+        <div class="inputs">
+          <label for="sb-date">Done on<input id="sb-date" name="date" type="date" value="${esc(batch.date)}"></label>
+          ${meter ? `<label for="sb-hrs">At (${word})<input id="sb-hrs" name="hrs" type="text" inputmode="decimal" autocomplete="off" value="${esc(batch.hrs)}"></label>` : ""}
+        </div>
+        <p class="warn" id="sbWarn" hidden></p>
+        <button class="btn primary svc-go" type="submit" id="sb-go"${n ? "" : " disabled"}>${svcGoText(n)}</button>
+      </div>
+    </form></section>`;
   }
+  const svcGoText = n => (n ? `Serviced · ${n} ${n === 1 ? "item" : "items"}` : "Serviced");
 
   function svcEditor(u, s, d) {
     const meter = C.usesMeter(u);
@@ -2536,6 +2588,64 @@
     if (cur !== null) { patch.svc[key].lh = cur; changes.push({ key: "svc." + key + ".lh", label: C.SVC_SUB.lh.label, section: s.title, from: d.lh, to: cur, type: "num" }); }
     const word = C.unitWord(u);
     commit(u, patch, changes, `Logged ${s.short.toLowerCase()} as done today${cur !== null ? " at " + C.fmtNum(cur) + " " + word : ""}.`);
+  }
+
+  function startSvcBatch() {
+    const u = S.units.get(S.openId); if (!u || S.readOnly) return;
+    const cur = C.usesMeter(u) ? C.num((u.v || {}).cur) : null;
+    startEdit({ type: "svcbatch", checked: [], date: C.isoDate(today()), hrs: cur === null ? "" : String(cur), focus: false });
+  }
+  // Everything checked off gets the same day (and reading). A reading past the last one moves the meter up too.
+  function saveSvcBatch(form) {
+    const u = S.units.get(S.openId); if (!u || !S.editing || S.editing.type !== "svcbatch") return;
+    const keys = [...form.querySelectorAll('input[name="svc"]:checked')].map(i => i.value).filter(k => C.SVC[k]);
+    if (!keys.length) return showWarn(form, "sbWarn", "Check off at least one thing you did.");
+    const date = form.elements.date.value, day = C.parseDate(date);
+    if (!day) return showWarn(form, "sbWarn", "Pick the day it was done.");
+    if (day > today()) return showWarn(form, "sbWarn", "That day hasn't come yet. Pick the day it was done.");
+    const meter = C.usesMeter(u), word = C.unitWord(u);
+    let hrs = null;
+    if (meter && form.elements.hrs && form.elements.hrs.value.trim() !== "") {
+      hrs = C.num(form.elements.hrs.value);
+      if (hrs === null || hrs < 0) return showWarn(form, "sbWarn", `Enter the ${word === "mi" ? "miles" : "hours"} as a number, like 3000.`);
+    }
+    const patch = { svc: {} }, changes = [];
+    keys.forEach(key => {
+      const s = C.SVC[key], d = (u.svc || {})[key] || {};
+      patch.svc[key] = { ld: date };
+      changes.push({ key: "svc." + key + ".ld", label: C.SVC_SUB.ld.label, section: s.title, from: d.ld, to: date, type: "date" });
+      if (hrs !== null) {
+        patch.svc[key].lh = hrs;
+        changes.push({ key: "svc." + key + ".lh", label: C.SVC_SUB.lh.label, section: s.title, from: d.lh, to: hrs, type: "num" });
+      }
+    });
+    const cur = meter ? C.num((u.v || {}).cur) : null;
+    if (hrs !== null && (cur === null || hrs > cur)) {
+      const read = (u.v || {}).read, rd = C.parseDate(read);
+      patch.v = { cur: hrs };
+      changes.push({ key: "cur", label: C.FIELDS.cur.label, section: "HOURS", from: cur, to: hrs, type: "num" });
+      if (!rd || day >= rd) { patch.v.read = date; changes.push({ key: "read", label: C.FIELDS.read.label, section: "HOURS", from: read, to: date, type: "date" }); }
+    }
+    const names = keys.map(k => C.SVC[k].short.toLowerCase());
+    const what = names.length === 1 ? names[0] : names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+    const when = date === C.isoDate(today()) ? "today" : "on " + C.usDate(day);
+    commit(u, patch, changes, `Logged ${what} as done ${when}${hrs !== null ? " at " + C.fmtNum(hrs) + " " + word : ""}.`);
+  }
+  function svcBatchInput(form, el) {
+    if (!S.editing || S.editing.type !== "svcbatch") return;
+    if (el.name === "svc") S.editing.checked = [...form.querySelectorAll('input[name="svc"]:checked')].map(i => i.value);
+    else if (el.name === "date") S.editing.date = el.value;
+    else if (el.name === "hrs") S.editing.hrs = el.value;
+    const n = S.editing.checked.length, go = form.querySelector("#sb-go");
+    if (go) { go.disabled = !n; go.textContent = svcGoText(n); }
+    showWarn(form, "sbWarn", "");
+  }
+
+  function saveReg(form) {
+    const u = S.units.get(S.openId); if (!u) return;
+    const val = form.elements.reg.value, d = C.parseDate(val);
+    if (!d) return showWarn(form, "regWarn", "Pick the date the registration runs out.");
+    saveValue(u, C.FIELDS.reg, val, `Registration for ${nameOf(u)} is good through ${C.usDate(d)}.`);
   }
 
   function saveAtt(form) {
@@ -2984,6 +3094,8 @@
     if (a === "fuel") return toggleFuel();
     if (a === "svc-edit") return startEdit({ type: "svc", svc: t.dataset.svc });
     if (a === "svc-done") return svcDone(t.dataset.svc);
+    if (a === "svc-batch") return startSvcBatch();
+    if (a === "reg") return startEdit({ type: "reg" });
     if (a === "att-edit") { const u = S.units.get(S.openId); S.attDraft = (u && u.att ? u.att.slice() : []); return startEdit({ type: "att" }); }
     if (a === "att-remove") { S.attDraft.splice(Number(t.dataset.i), 1); S.editing.focus = false; return renderDetail(); }
     if (a === "att-add") {
@@ -3041,8 +3153,11 @@
     if (f.dataset.form === "att") return saveAtt(f);
     if (f.dataset.form === "attwith") return saveAttWith(f);
     if (f.dataset.form === "insp") return saveInsp(f);
+    if (f.dataset.form === "svcbatch") return saveSvcBatch(f);
+    if (f.dataset.form === "reg") return saveReg(f);
   });
   document.addEventListener("change", e => {
+    if (e.target.form && e.target.form.dataset.form === "svcbatch") return svcBatchInput(e.target.form, e.target);
     if (e.target.id === "showNA") { S.showNA = e.target.checked; lsSet("showNA", S.showNA); renderDetail(); }
     if (e.target.id === "lockAfter" && L.pin) {
       L.pin = Object.assign({}, L.pin, { after: Number(e.target.value) });
@@ -3058,6 +3173,7 @@
     const i = e.target;
     if (i.name === "hrs" && i.dataset && i.dataset.for) { hoursDraft(i.dataset.for, C.num(i.value), true); return; }
     if (i.form && i.form.dataset && i.form.dataset.form === "add") { addLive(i.form, i.name); return; }
+    if (i.form && i.form.dataset && i.form.dataset.form === "svcbatch") { svcBatchInput(i.form, i); return; }
     if (!i.classList || !i.classList.contains("code-input")) return;
     const raw = normKey(i.value).slice(0, 12);
     const pretty = raw.replace(/(.{4})(?=.)/g, "$1-");
