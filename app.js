@@ -122,6 +122,7 @@
     S.me.name = c.name || "Me";
     S.me.isOwner = c.role !== "crew";   // a coworker's code: everything they send waits for the owner's approval
     S.me.limited = !!c.limited;   // a code just for certain machines: it sees only those, and adds none
+    S.me.home = typeof c.home === "string" ? c.home : "";   // a code that opens on its own machine (Home screen on the Crew tab)
     const mark = $("#brandMark"), name = $("#brandName");
     if (mark) mark.textContent = c.mark || "ML";
     if (name) name.textContent = c.brand || "Machine List";
@@ -380,6 +381,7 @@
     }
     S.phase = "app";   // with no copy of the equipment yet, it shows Loading and downloads it with the saved code
     derive();
+    S.openId = homeId();   // a code with a Home screen opens on its own machine
     navStart();
     if (shouldLock()) openLock("unlock");
     render();
@@ -611,6 +613,7 @@
     derive();
     S.phase = "app";
     S.tab = "fleet";
+    S.openId = homeId();
     navStart();
     lsSet("seenAt", Date.now());
     if (!L.pin && why === "setup") openLock("new", true);
@@ -910,7 +913,7 @@
     const order = groupOrder();
     const tabs = order.filter(k => !C.NO_TAB.has(k) && all.some(x => x.g === k));
     const hasMine = all.some(x => isMine(x.u));
-    if (!S.cat) S.cat = hasMine && !S.me.isOwner ? "me" : "all";
+    if (!S.cat) S.cat = hasMine && !S.me.isOwner && !homeId() ? "me" : "all";   // with a Home screen, the list is for everything else
     if (S.cat === "me" ? !hasMine : S.cat !== "all" && !tabs.includes(S.cat)) S.cat = "all";
     if (!TD.on) {   // never redraw the row under a finger that's moving a tab
       chips.classList.toggle("wrap", finePointer());   // with a mouse, show every tab instead of a row to swipe
@@ -2904,12 +2907,15 @@
   // A screen: the tab, the open unit (or the Add form), and the Overdue / Problems / … filter. The quick
   // buttons on a unit get their own step too (qa), so Back closes them.
   const screenNow = extra => Object.assign({ ml: 1, tab: S.tab, openId: S.openId || null, add: S.adding || null, st: S.st }, extra || {});
+  // A code set up with a Home screen (the Crew tab) opens on that machine instead of the main list, and Back
+  // stays put there the way it does on the main list. Every other machine is a tap away under All units.
+  const homeId = () => (S.me.home && S.units && S.units.has(S.me.home) ? S.me.home : null);
 
   function navStart() {
     if (NAV.on) return;
     NAV.on = true;
     try { history.scrollRestoration = "manual"; } catch (e) { /* older browsers */ }
-    try { history.replaceState({ ml: 1, base: 1, tab: "fleet", openId: null }, ""); } catch (e) { /* fine */ }
+    try { history.replaceState({ ml: 1, base: 1, tab: "fleet", openId: homeId() }, ""); } catch (e) { /* fine */ }
     NAV.atBase = true;
     const tapped = () => { NAV.pushed = false; setTimeout(navArm, 0); };
     document.addEventListener("click", tapped, true);
@@ -2920,7 +2926,7 @@
   // On the bottom step after a tap that didn't move anywhere: add a step for this screen, so Back has one to take.
   function navArm() {
     if (!NAV.on || !NAV.atBase || NAV.pushed || S.phase !== "app") return;
-    try { history.pushState(screenNow(S.editing ? { ed: 1 } : null), ""); NAV.atBase = false; } catch (e) { /* fine */ }
+    try { history.pushState(screenNow(Object.assign({ arm: 1 }, S.editing ? { ed: 1 } : null)), ""); NAV.atBase = false; } catch (e) { /* fine */ }
   }
   // Moving to a new screen: remember how far down the old one was scrolled, then add a step for the new one.
   // Leaving an open editor reuses its step, so Back doesn't stop on a screen that looks the same.
@@ -2952,7 +2958,7 @@
     const hadEditor = !!S.editing;
     if (S.editing && !st.ed) { S.editing = null; S.attDraft = null; }   // Back closes an editor without saving, like Cancel
     const tab = TABS.includes(st.tab) && !(st.tab === "approved" && !S.me.isOwner) ? st.tab : "fleet";
-    const id = st.openId && S.units.has(st.openId) ? st.openId : null;
+    const id = st.base ? homeId() : st.openId && S.units.has(st.openId) ? st.openId : null;   // the bottom step is the home screen
     const filter = typeof st.st === "string" && st.st ? st.st : "all";
     const add = !id && st.add ? st.add : null;
     const qa = st.qa && S.units.has(st.qa) ? st.qa : null;
@@ -2977,7 +2983,7 @@
   // On the main list, Chrome on Android also lets the app swallow a Back press outright.
   function rootWatch() {
     // Only the plain main list holds Back. With a filter, the quick buttons or the Add form showing, Back has a step to take.
-    const atRoot = NAV.on && S.phase === "app" && S.tab === "fleet" && !S.openId && !S.editing && !S.adding && !S.quick && S.st === "all";
+    const atRoot = NAV.on && S.phase === "app" && S.tab === "fleet" && (S.openId || null) === homeId() && !S.editing && !S.adding && !S.quick && S.st === "all";
     if (atRoot && !NAV.rootW && typeof window.CloseWatcher === "function") {
       try {
         const w = new window.CloseWatcher();
@@ -2995,13 +3001,15 @@
   // ---------------------------------------------------------------- navigation
   function setTab(t) {
     if (!TABS.includes(t) || (t === "approved" && !S.me.isOwner)) t = "fleet";
-    if (t === S.tab && (!(S.openId || S.adding) || window.innerWidth >= 980)) { window.scrollTo(0, 0); return; }   // already there
+    const home = t === "fleet" ? homeId() : null;   // with a Home screen, Fleet goes back to that machine
+    if (t === S.tab && (home ? S.openId === home && !S.adding : !(S.openId || S.adding) || window.innerWidth >= 980)) { window.scrollTo(0, 0); return; }   // already there
     S.editing = null; S.attDraft = null; S.quick = null;
-    if (window.innerWidth < 980) S.adding = null;
+    if (window.innerWidth < 980 || home) S.adding = null;
     S.tab = t; lsSet("tab", t);
     S.confirmReset = false;
     if (S.sendState === "confirm") S.sendState = null;
     if (window.innerWidth < 980 && S.openId) closeUnit(true);
+    if (home) S.openId = home;
     navPush();
     render();
     window.scrollTo(0, 0);
@@ -3024,6 +3032,16 @@
     if (silent) return;
     render();
     window.scrollTo(0, S.listScroll || 0);
+    rootWatch();
+  }
+  // From the home screen (a code that opens on its own machine): the main list, as a step that Back comes home from.
+  function showAllUnits() {
+    closeUnit(true);
+    S.quick = null;
+    navPush();
+    render();
+    window.scrollTo(0, 0);
+    const pl = document.querySelector(".pane-list"); if (pl) pl.scrollTop = 0;
     rootWatch();
   }
   function startEdit(obj) {
@@ -3062,8 +3080,9 @@
     if (t.dataset.st) return setSt(t.dataset.st);
     if (t.dataset.chf) { S.chFilter = t.dataset.chf; return renderChanges(); }
     const a = t.dataset.action;
-    if (a === "close") {   // "All units" works like Back
+    if (a === "close") {   // "All units" works like Back. On the home screen it opens the main list, and Back comes home.
       const st = history.state;
+      if (homeId() && S.openId === homeId() && (!st || !st.ml || st.base || st.arm)) return showAllUnits();
       if (NAV.on && st && st.ml && !st.base && st.openId === S.openId && goBackOne()) return;
       return closeUnit();
     }
