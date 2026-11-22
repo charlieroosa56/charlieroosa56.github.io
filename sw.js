@@ -1,7 +1,7 @@
 /* Machine List background helper. It keeps a copy of the app on this phone so the app opens with no
    signal, and on Android it sends waiting updates by itself once there's service, even with the app closed.
    The build fills in the version and file list below; a new version replaces the old copy. */
-self.ML_VERSION = "2026.11.20-c72718";
+self.ML_VERSION = "2026.11.22-c0bb41";
 importScripts("sync-core.js");
 
 const CACHE = "ml-" + self.ML_VERSION;
@@ -18,11 +18,11 @@ const FILES = [
  "fonts/ibm-plex-mono-latin-400-normal.woff2",
  "fonts/ibm-plex-mono-latin-500-normal.woff2",
  "fonts/ibm-plex-mono-latin-600-normal.woff2",
- "icons/apple-touch-icon.png",
+ "icons/apple-touch-icon-325.png",
  "icons/badge-96.png",
- "icons/icon-192.png",
- "icons/icon-512.png",
- "icons/icon-maskable-512.png",
+ "icons/icon-325-192.png",
+ "icons/icon-325-512.png",
+ "icons/icon-325-maskable-512.png",
  "index.html",
  "manifest.webmanifest",
  "styles.css",
@@ -99,7 +99,7 @@ self.addEventListener("push", event => {
     let t = { title: "Machine List", body: "Tap to check today's updates." };
     try { t = await reminderText(); } catch (e) { /* plain note */ }
     await self.registration.showNotification(t.title, {
-      body: t.body, tag: "ml-daily", renotify: true, icon: "icons/icon-192.png", badge: "icons/badge-96.png",
+      body: t.body, tag: "ml-daily", renotify: true, icon: "icons/icon-325-192.png", badge: "icons/badge-96.png",
       data: { url: new URL("./?open=changes", SCOPE).href }
     });
   })());
