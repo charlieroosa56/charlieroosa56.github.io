@@ -1407,11 +1407,12 @@
     if (!S.unitsLoaded) { el.innerHTML = stateBlock("loading"); return; }
     const t = today();
     const items = [];
-    let notSet = 0;
+    let notSet = 0, noLast = 0;
     unitsArr().forEach(u => {
       C.unitIssues(u, t).forEach(i => items.push(Object.assign({ u }, i)));
       const st = C.unitStatus(u, t).st;
-      if (st === "set" || st === "need") notSet++;
+      if (st === "set") notSet++;
+      else if (st === "need") noLast++;
     });
     const block = (title, list, st) => !list.length ? "" :
       `<section class="group"><div class="group-h"><h2>${title}</h2><span>${list.length}</span></div><div class="list">${list.map(i => `
@@ -1424,6 +1425,7 @@
       html = `<div class="card empty-state"><h3>Nothing due</h3><p>Service shows up here once a unit has its interval and last service filled in. State inspections show up 3 months before they're due. Registration, HUT and warranty dates show up 30 days before they run out.</p></div>`;
     }
     if (notSet) html += `<p class="muted" style="margin:0 2px">${notSet} of ${S.units.size} units don't have service intervals filled in yet. Open a unit and tap Edit on a service to add one.</p>`;
+    if (noLast) html += `<p class="muted" style="margin:${notSet ? "8px" : "0"} 2px 0">${noLast} of ${S.units.size} units have their service intervals but no last service on record yet. Open a unit and tap Done today, or Edit to enter the last date and hours.</p>`;
     el.innerHTML = html;
   }
 
